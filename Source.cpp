@@ -11,7 +11,7 @@
 
 #define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 4  // it does this many samples squared per pixel for AA
 
-#define FORCE_SINGLE_THREADED() 0
+#define FORCE_SINGLE_THREADED() 0  // useful for debugging
 
 // stb_image is an amazing header only image library (aka no linking, just include the headers!).  http://nothings.org/stb
 #pragma warning( disable : 4996 ) 
@@ -308,7 +308,7 @@ inline bool RayIntersect (const float3& rayPos, const float3& rayDir, const SSph
 //-------------------------------------------------------------------------------------------------------------------
 static SQuad g_quads[] =
 {
-    { { -15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, -15.0f },{ -15.0f, 0.0f, -15.0f }, {0.0f, 1.0f, 0.0}},
+    { { -15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, -15.0f },{ -15.0f, 0.0f, -15.0f }, {1.0f, 1.0f, 1.0}},
 };
 
 static const SSphere g_spheres[] =
@@ -320,12 +320,14 @@ static const SSphere g_spheres[] =
 
 static const SDirectionalLight g_directionalLights[] =
 {
-    {{-0.3f, -1.0f, 0.0f}, 1.0f, {1.0f, 1.0f, 1.0f}},
+    {{-0.3f, -1.0f, 0.0f}, 1.0f, {0.0f, 0.0f, 0.0f}},
 };
 
 static const SPositionalLight g_positionalLights[] =
 {
-    {{0.0f, 2.0f, 0.0f},1.0f,{5.0f, 5.0f, 10.0f}},
+    {{-4.0f, 5.0f, 5.0f},1.0f,{20.0f, 10.0f, 10.0f}},
+    {{ 0.0f, 5.0f, 0.0f},1.0f,{10.0f, 20.0f, 10.0f}},
+    {{ 4.0f, 5.0f, 5.0f},1.0f,{10.0f, 10.0f, 20.0f}},
 };
 
 static const float  g_cameraDistance = 2.0f;
@@ -420,7 +422,7 @@ float3 PixelFunction (float u, float v)
         for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
             intersectionFound |= RayIntersect(shadowPos, lightDir, g_quads[i], shadowHitInfo);
 
-        if (shadowHitInfo.collisionTime > 0.0f)
+        if (intersectionFound)
             continue;
 
         float NdotL = Dot(lightDir, hitInfo.normal);
@@ -444,14 +446,15 @@ float3 PixelFunction (float u, float v)
         for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
             intersectionFound |= RayIntersect(shadowPos, lightDir, g_quads[i], shadowHitInfo);
 
-        if (shadowHitInfo.collisionTime > 0.0f)
+        if (intersectionFound)
             continue;
 
-        // TODO: squared falloff attenuation!
+        // squared falloff attenuation
+        float atten = 1.0f / (shadowHitInfo.collisionTime * shadowHitInfo.collisionTime);
 
         float NdotL = Dot(lightDir, hitInfo.normal);
         if (NdotL > 0.0f)
-            ret = ret + g_positionalLights[lightIndex].color * hitInfo.albedo * NdotL;
+            ret = ret + g_positionalLights[lightIndex].color * hitInfo.albedo * NdotL * atten;
     }
 
     return ret;
@@ -548,8 +551,6 @@ int main (int argc, char** argv)
 
 TODO:
 
-! point light is always colliding for some reason ):
-
 * point light
 * directional light
 * IBL?
@@ -561,6 +562,8 @@ TODO:
 * animated & make an animated gif of results? (gif is low quality though... maybe ffmpeg?)
 
 * todos
+
+? ambient lighting? or multibounce? (approaching path tracing then though...)
 
 BLOG:
 * Using stratified sampling, reinhard tone mapping, and gamma 2.2
