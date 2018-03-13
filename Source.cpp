@@ -80,10 +80,14 @@ float3 operator/ (const float3& a, float b)
     return a * (1.0f / b);
 }
 
+float Length(const float3& a)
+{
+    return std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+}
+
 float3 Normalize(const float3& a)
 {
-    float len = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
-    return a / len;
+    return a / Length(a);
 }
 
 float Dot(const float3& a, const float3& b)
@@ -321,7 +325,7 @@ static const SDirectionalLight g_directionalLights[] =
 
 static const SPositionalLight g_positionalLights[] =
 {
-    {{3.0f, 5.0f, 3.0f},1.0f,{5.0f, 5.0f, 10.0f}},
+    {{0.0f, 2.0f, 0.0f},1.0f,{5.0f, 5.0f, 10.0f}},
 };
 
 static const float  g_cameraDistance = 2.0f;
@@ -401,15 +405,16 @@ float3 PixelFunction (float u, float v)
     if (hitInfo.collisionTime <= 0.0f)
         return g_skyColor;
 
-    // apply lighting
+    // apply directional lighting
     float3 pixelPos = rayPos + rayDir * hitInfo.collisionTime;
+    float3 shadowPos = pixelPos + hitInfo.normal * c_rayEpsilon;
     for (size_t lightIndex = 0; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
     {
         float3 lightDir = Normalize(g_directionalLights[lightIndex].direction * -1.0f);
-        float3 shadowPos = pixelPos + hitInfo.normal * c_rayEpsilon;
+
+        SHitInfo shadowHitInfo;
 
         bool intersectionFound = false;
-        SHitInfo shadowHitInfo;
         for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
             intersectionFound |= RayIntersect(shadowPos, lightDir, g_spheres[i], shadowHitInfo);
         for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
@@ -418,7 +423,35 @@ float3 PixelFunction (float u, float v)
         if (shadowHitInfo.collisionTime > 0.0f)
             continue;
 
-        ret = ret + g_directionalLights[lightIndex].color * hitInfo.albedo;
+        float NdotL = Dot(lightDir, hitInfo.normal);
+        if (NdotL > 0.0f)
+            ret = ret + g_directionalLights[lightIndex].color * hitInfo.albedo * NdotL;
+    }
+
+    // apply positional lighting
+    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+    {
+        float3 lightDir = g_positionalLights[lightIndex].position - shadowPos;
+        float lightDist = Length(lightDir);
+        lightDir = Normalize(lightDir);
+
+        SHitInfo shadowHitInfo;
+        shadowHitInfo.collisionTime = lightDist; // only go until we hit the light
+
+        bool intersectionFound = false;
+        for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
+            intersectionFound |= RayIntersect(shadowPos, lightDir, g_spheres[i], shadowHitInfo);
+        for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
+            intersectionFound |= RayIntersect(shadowPos, lightDir, g_quads[i], shadowHitInfo);
+
+        if (shadowHitInfo.collisionTime > 0.0f)
+            continue;
+
+        // TODO: squared falloff attenuation!
+
+        float NdotL = Dot(lightDir, hitInfo.normal);
+        if (NdotL > 0.0f)
+            ret = ret + g_positionalLights[lightIndex].color * hitInfo.albedo * NdotL;
     }
 
     return ret;
@@ -514,6 +547,9 @@ int main (int argc, char** argv)
 /*
 
 TODO:
+
+! point light is always colliding for some reason ):
+
 * point light
 * directional light
 * IBL?
@@ -524,12 +560,7 @@ TODO:
 
 * animated & make an animated gif of results? (gif is low quality though... maybe ffmpeg?)
 
-? multi sample per pixel?
-? should we have a thread do a row of pixels instead of a single pixel at a time? i think so.
-
 * todos
-
-? why is pixelSize
 
 BLOG:
 * Using stratified sampling, reinhard tone mapping, and gamma 2.2
