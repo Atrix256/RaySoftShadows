@@ -4,9 +4,14 @@
 #include <array>
 #include <stdint.h>
 #include <stdlib.h>
+#include <random>
 
-#define IMAGE_WIDTH  1024
-#define IMAGE_HEIGHT 768
+#define IMAGE_WIDTH() 1024
+#define IMAGE_HEIGHT() 768
+
+#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 4  // it does this many samples squared per pixel for AA
+
+#define FORCE_SINGLE_THREADED() 0
 
 // stb_image is an amazing header only image library (aka no linking, just include the headers!).  http://nothings.org/stb
 #pragma warning( disable : 4996 ) 
@@ -20,6 +25,8 @@ typedef std::array<float, 3> float3;
 float LinearTosRGB(float value);
 
 static const float c_rayEpsilon = 0.01f; // value used to push the ray a little bit away from surfaces before doing shadow rays
+
+#define STRATIFIED_SAMPLE_COUNT() (STRATIFIED_SAMPLE_COUNT_ONE_AXIS()*STRATIFIED_SAMPLE_COUNT_ONE_AXIS())
 
 //-------------------------------------------------------------------------------------------------------------------
 
@@ -115,7 +122,10 @@ struct SImageData
         std::vector<uint8> pixelsU8;
         pixelsU8.resize(m_pixels.size());
         for (size_t i = 0; i < m_pixels.size(); ++i)
-            pixelsU8[i] = uint8(LinearTosRGB(m_pixels[i])*255.0f);
+        {
+            float toneMapped = m_pixels[i] / (m_pixels[i] + 1.0f);
+            pixelsU8[i] = uint8(LinearTosRGB(toneMapped)*255.0f);
+        }
 
         // save the image
         return (stbi_write_png(fileName, (int)m_width, (int)m_height, 3, &pixelsU8[0], (int)Pitch()) == 1);
@@ -332,7 +342,7 @@ void RunMultiThreaded (const char* label, const L& lambda)
         lambda(atomicCounter);
     };
 
-    size_t numThreads = std::thread::hardware_concurrency();
+    size_t numThreads = FORCE_SINGLE_THREADED() ? 1 : std::thread::hardware_concurrency();
     printf("Doing %s with %zu threads.\n", label, numThreads);
     if (numThreads > 1)
     {
@@ -365,10 +375,10 @@ float LinearTosRGB (float value)
 }
 
 //-------------------------------------------------------------------------------------------------------------------
-void PixelFunction (float u, float v, float3& pixel)
+float3 PixelFunction (float u, float v)
 {
     // init pixel to black
-    pixel = { 0.0f, 0.0f, 0.0f };
+    float3 ret = { 0.0f, 0.0f, 0.0f };
 
     // calculate the ray
     float3 rayPos = g_cameraPos;
@@ -389,10 +399,7 @@ void PixelFunction (float u, float v, float3& pixel)
 
     // if we missed, return sky color
     if (hitInfo.collisionTime <= 0.0f)
-    {
-        pixel = g_skyColor;
-        return;
-    }
+        return g_skyColor;
 
     // apply lighting
     float3 pixelPos = rayPos + rayDir * hitInfo.collisionTime;
@@ -401,64 +408,88 @@ void PixelFunction (float u, float v, float3& pixel)
         float3 lightDir = Normalize(g_directionalLights[lightIndex].direction * -1.0f);
         float3 shadowPos = pixelPos + hitInfo.normal * c_rayEpsilon;
 
-        // TODO: exit geo loops on first hit!
+        bool intersectionFound = false;
         SHitInfo shadowHitInfo;
-        for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]); ++i)
-            RayIntersect(shadowPos, lightDir, g_spheres[i], shadowHitInfo);
-        for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]); ++i)
-            RayIntersect(shadowPos, lightDir, g_quads[i], shadowHitInfo);
+        for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
+            intersectionFound |= RayIntersect(shadowPos, lightDir, g_spheres[i], shadowHitInfo);
+        for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
+            intersectionFound |= RayIntersect(shadowPos, lightDir, g_quads[i], shadowHitInfo);
 
         if (shadowHitInfo.collisionTime > 0.0f)
             continue;
 
-        pixel = pixel + g_directionalLights[lightIndex].color * hitInfo.albedo;
+        ret = ret + g_directionalLights[lightIndex].color * hitInfo.albedo;
     }
 
-    /*
-    pixel[0] = u;
-    pixel[1] = v;
-    pixel[2] = 0.0f;
-
-    pixel = rayDir * 0.5f + 0.5f;
-
-    pixel = hitInfo.albedo;
-    */
+    return ret;
 }
 
 //-------------------------------------------------------------------------------------------------------------------
 template <typename LAMBDA>
 void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
 {
-    SImageData output(IMAGE_WIDTH, IMAGE_HEIGHT);
+    SImageData output(IMAGE_WIDTH(), IMAGE_HEIGHT());
     const size_t numPixels = output.m_width * output.m_height;
 
     float aspectRatio = float(output.m_width) / float(output.m_height);
 
     // calculate image
     RunMultiThreaded(task,
-        [&] (std::atomic<size_t>& atomicPixelIndex)
+        [&] (std::atomic<size_t>& atomicRowIndex)
         {
-            size_t pixelIndex = atomicPixelIndex.fetch_add(1);
-            bool reportProgress = (pixelIndex == 0);
+            std::random_device rd;
+            std::mt19937 rng(rd());
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS()));
+
+            // pixel size is 2x because uv goes from -1 to 1, so is twice as big.
+            float pixelSizeU = 2.0f / float(output.m_width);
+            float pixelSizeV = 2.0f / float(output.m_height);
+
+            size_t rowIndex = atomicRowIndex.fetch_add(1);
+            bool reportProgress = (rowIndex == 0);
             int oldPercent = -1;
-            while (pixelIndex < numPixels)
+            while (rowIndex < output.m_height)
             {
-                // calculate uv coordinate of pixel in [-1,1], also correcting for aspect ratio and flipping the vertical axis
-                float u = ((float(pixelIndex % output.m_width) / float(output.m_width - 1)) * 2.0f - 1.0f) * aspectRatio;
-                float v = ((float(pixelIndex / output.m_width) / float(output.m_height - 1)) * 2.0f - 1.0f) * -1.0f;
-
-                // shade the pixel
-                lambda(u, v, *(float3*)&output.m_pixels[pixelIndex * 3]);
-
-                // report progress
-                if (reportProgress)
+                // do a row of work at a time
+                size_t pixelBase = rowIndex * output.m_width;
+                for (size_t pixelOffset = 0; pixelOffset < output.m_width; ++pixelOffset)
                 {
-                    int newPercent = (int)(100.0f * float(pixelIndex) / float(numPixels));
-                    if (oldPercent != newPercent)
-                        printf("\rProgress: %i%%", newPercent);
+                    size_t pixelIndex = pixelBase + pixelOffset;
+
+                    // calculate uv coordinate of pixel in [-1,1], also correcting for aspect ratio and flipping the vertical axis
+                    float u = ((float(pixelIndex % output.m_width) / float(output.m_width)) * 2.0f - 1.0f) * aspectRatio;
+                    float v = ((float(pixelIndex / output.m_width) / float(output.m_height)) * 2.0f - 1.0f) * -1.0f;
+
+                    // do multiple samples per pixel via stratified sampling and combine with a box filter
+                    float3 sampleSum = { 0.0f, 0.0f, 0.0f };
+                    for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
+                    {
+                        float stratU = float((sampleIndex) % STRATIFIED_SAMPLE_COUNT_ONE_AXIS()) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS());
+                        float stratV = float(((sampleIndex) / STRATIFIED_SAMPLE_COUNT_ONE_AXIS()) % STRATIFIED_SAMPLE_COUNT_ONE_AXIS()) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS());
+
+                        stratU += dist(rng);
+                        stratV += dist(rng);
+
+                        stratU *= pixelSizeU;
+                        stratV *= pixelSizeV;
+
+                        sampleSum = sampleSum + lambda(u + stratU, v + stratV);
+                    }
+                    *(float3*)&output.m_pixels[pixelIndex * 3] = sampleSum / float(STRATIFIED_SAMPLE_COUNT());
+
+                    // report progress
+                    if (reportProgress)
+                    {
+                        int newPercent = (int)(100.0f * float(pixelIndex) / float(numPixels));
+                        if (oldPercent != newPercent)
+                        {
+                            printf("\rProgress: %i%%", newPercent);
+                            oldPercent = newPercent;
+                        }
+                    }
                 }
 
-                pixelIndex = atomicPixelIndex.fetch_add(1);
+                rowIndex = atomicRowIndex.fetch_add(1);
             }
 
             if (reportProgress)
@@ -485,21 +516,22 @@ int main (int argc, char** argv)
 TODO:
 * point light
 * directional light
+* IBL?
 
 * analytical (many rays) vs ray marched (single ray)
 
 * white noise sampling vs blue noise sampling
 
-* handle aspect ratio, from center of screen
-
 * animated & make an animated gif of results? (gif is low quality though... maybe ffmpeg?)
-
-? do we need reinhard tone mapping?
 
 ? multi sample per pixel?
 ? should we have a thread do a row of pixels instead of a single pixel at a time? i think so.
 
-* ambient light settings? or at least a "miss" ray color?
-* projection matrix settings
+* todos
+
+? why is pixelSize
+
+BLOG:
+* Using stratified sampling, reinhard tone mapping, and gamma 2.2
 
 */
