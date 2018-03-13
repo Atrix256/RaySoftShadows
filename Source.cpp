@@ -5,6 +5,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define IMAGE_WIDTH  1024
+#define IMAGE_HEIGHT 768
+
 // stb_image is an amazing header only image library (aka no linking, just include the headers!).  http://nothings.org/stb
 #pragma warning( disable : 4996 ) 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -296,12 +299,14 @@ static SQuad g_quads[] =
 
 static const SSphere g_spheres[] =
 {
-    {{0.0f, 2.0f, 5.0f}, 1.0f, {1.0f, 0.0f, 0.0f}},
+    {{0.0f, 2.0f, 5.0f}, 1.0f, {1.0f, 0.1f, 0.1f}},
+    {{-2.0f, 2.3f, 7.0f}, 1.0f, {0.1f, 1.0f, 0.1f}},
+    {{3.0f, 1.8f, 8.0f}, 1.0f, {0.1f, 0.1f, 1.0f}},
 };
 
 static const SDirectionalLight g_directionalLights[] =
 {
-    {{0.0f, -1.0f, 0.0f}, 1.0f, {10.0f, 5.0f, 5.0f}},
+    {{-0.3f, -1.0f, 0.0f}, 1.0f, {1.0f, 1.0f, 1.0f}},
 };
 
 static const SPositionalLight g_positionalLights[] =
@@ -424,7 +429,7 @@ void PixelFunction (float u, float v, float3& pixel)
 template <typename LAMBDA>
 void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
 {
-    SImageData output(640, 480);
+    SImageData output(IMAGE_WIDTH, IMAGE_HEIGHT);
     const size_t numPixels = output.m_width * output.m_height;
 
     float aspectRatio = float(output.m_width) / float(output.m_height);
