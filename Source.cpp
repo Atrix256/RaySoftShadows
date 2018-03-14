@@ -11,7 +11,12 @@
 
 #define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 4  // it does this many samples squared per pixel for AA
 
+#define STRATIFIED_SHADOW_SAMPLE_COUNT_ONE_AXIS() 4  // it does this many samples squared per pixel sample per light for shadow rays
+
 #define FORCE_SINGLE_THREADED() 0  // useful for debugging
+
+
+
 
 // stb_image is an amazing header only image library (aka no linking, just include the headers!).  http://nothings.org/stb
 #pragma warning( disable : 4996 ) 
@@ -21,12 +26,15 @@
 
 typedef uint8_t uint8;
 typedef std::array<float, 3> float3;
+typedef std::array<std::array<float, 3>, 3> float3x3;
 
 float LinearTosRGB(float value);
 
 static const float c_rayEpsilon = 0.01f; // value used to push the ray a little bit away from surfaces before doing shadow rays
+static const float c_pi = 3.14159265359f;
 
 #define STRATIFIED_SAMPLE_COUNT() (STRATIFIED_SAMPLE_COUNT_ONE_AXIS()*STRATIFIED_SAMPLE_COUNT_ONE_AXIS())
+#define STRATIFIED_SHADOW_SAMPLE_COUNT() (STRATIFIED_SHADOW_SAMPLE_COUNT_ONE_AXIS()*STRATIFIED_SHADOW_SAMPLE_COUNT_ONE_AXIS())
 
 //-------------------------------------------------------------------------------------------------------------------
 
@@ -80,6 +88,45 @@ float3 operator/ (const float3& a, float b)
     return a * (1.0f / b);
 }
 
+float3x3 operator* (const float3x3& a, float b)
+{
+    float3x3 ret;
+    for (size_t y = 0; y < 3; ++y)
+    {
+        for (size_t x = 0; x < 3; ++x)
+        {
+            ret[y][x] = a[y][x] * b;
+        }
+    }
+    return ret;
+}
+
+float3 operator* (const float3x3& a, const float3& b)
+{
+    float3 ret = { 0.0f, 0.0f, 0.0f };
+    for (size_t y = 0; y < 3; ++y)
+    {
+        for (size_t x = 0; x < 3; ++x)
+        {
+            ret[y] = a[y][x] *  b[x];
+        }
+    }
+    return ret;
+}
+
+float3x3 operator+ (const float3x3& a, const float3x3& b)
+{
+    float3x3 ret;
+    for (size_t y = 0; y < 3; ++y)
+    {
+        for (size_t x = 0; x < 3; ++x)
+        {
+            ret[y][x] = a[y][x] + b[y][x];
+        }
+    }
+    return ret;
+}
+
 float Length(const float3& a)
 {
     return std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
@@ -108,6 +155,95 @@ inline float3 Cross (const float3& a, const float3& b)
 inline float ScalarTriple(const float3& a, const float3& b, const float3& c)
 {
     return Dot(Cross(a, b), c);
+}
+
+inline float3x3 Transpose(const float3x3& a)
+{
+    float3x3 ret;
+    ret[0] = { a[0][0], a[1][0], a[2][0] };
+    ret[1] = { a[0][1], a[1][1], a[2][1] };
+    ret[2] = { a[0][2], a[1][2], a[2][2] };
+    return ret;
+}
+
+inline float3x3 MultiplyVectorByTranspose(const float3& a)
+{
+    float3x3 ret;
+    for (size_t y = 0; y < 3; ++y)
+    {
+        for (size_t x = 0; x < 3; ++x)
+        {
+            ret[y][x] = a[y] * a[x];
+        }
+    }
+    return ret;
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+float3 RandomVectorInsideCone (float3 coneDir, float coneAngle, std::mt19937& rng)
+{
+    // Translated from: https://stackoverflow.com/questions/38997302/create-random-unit-vector-inside-a-defined-conical-region
+
+
+    // Generate points on the spherical cap around the north pole [1].
+    // [1] See https://math.stackexchange.com/a/205589/81266
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    float z = dist(rng) * (1.0f - std::cosf(coneAngle)) + std::cosf(coneAngle);
+    float phi = dist(rng) * 2.0f * c_pi;
+    float x = std::sqrtf(1.0f - z * z) * std::cosf(phi);
+    float y = std::sqrtf(1.0f - z * z) * std::sinf(phi);
+
+    // Find the rotation axis `u` and rotation angle `rot`[1]
+    float3 u = Normalize(Cross({ 0.0f, 0.0f, 1.0f }, Normalize(coneDir)));
+    float rot = std::acosf(Dot(Normalize(coneDir), { 0.0f, 0.0f, 1.0f }));
+
+    // Convert rotation axis and angle to 3x3 rotation matrix [2]
+    // [2] See https://en.wikipedia.org/wiki/Rotation_matrix#Rotation_matrix_from_axis_and_angle
+    float3x3 crossMatrix;
+    crossMatrix[0] = { 0.0f, -u[2], u[1] };
+    crossMatrix[1] = { u[2], 0.0f, -u[0] };
+    crossMatrix[2] = { -u[1], u[0], 0.0f };
+
+    float3x3 identity;
+    identity[0] = { 1.0f, 0.0f, 0.0f };
+    identity[1] = { 0.0f, 1.0f, 0.0f };
+    identity[2] = { 0.0f, 0.0f, 1.0f };
+
+    float3x3 R = identity * std::cosf(rot) + crossMatrix * std::sinf(rot) + MultiplyVectorByTranspose(u) * (1.0f - std::cosf(rot));
+
+    // Rotate[x; y; z] from north pole to `coneDir`.
+    float3 r = { x, y, z };
+    return R * r;
+
+
+    /*
+    coneAngle = coneAngleDegree * pi/180;
+
+    % Generate points on the spherical cap around the north pole [1].
+    % [1] See https://math.stackexchange.com/a/205589/81266
+    z = RNG.rand(1, N) * (1 - cos(coneAngle)) + cos(coneAngle);
+    phi = RNG.rand(1, N) * 2 * pi;
+    x = sqrt(1-z.^2).*cos(phi);
+    y = sqrt(1-z.^2).*sin(phi);
+
+    % If the spherical cap is centered around the north pole, we're done.
+    if all(coneDir(:) == [0;0;1])
+    r = [x; y; z];
+    return;
+    end
+
+    % Find the rotation axis `u` and rotation angle `rot` [1]
+    u = normc(cross([0;0;1], normc(coneDir)));
+    rot = acos(dot(normc(coneDir), [0;0;1]));
+
+    % Convert rotation axis and angle to 3x3 rotation matrix [2]
+    % [2] See https://en.wikipedia.org/wiki/Rotation_matrix#Rotation_matrix_from_axis_and_angle
+    crossMatrix = @(x,y,z) [0 -z y; z 0 -x; -y x 0];
+    R = cos(rot) * eye(3) + sin(rot) * crossMatrix(u(1), u(2), u(3)) + (1-cos(rot))*(u * u');
+
+    % Rotate [x; y; z] from north pole to `coneDir`.
+    r = R * [x; y; z];
+    */
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -381,7 +517,7 @@ float LinearTosRGB (float value)
 }
 
 //-------------------------------------------------------------------------------------------------------------------
-float3 PixelFunction (float u, float v)
+float3 PixelFunction (float u, float v, std::mt19937& rng)
 {
     // init pixel to black
     float3 ret = { 0.0f, 0.0f, 0.0f };
@@ -413,6 +549,19 @@ float3 PixelFunction (float u, float v)
     for (size_t lightIndex = 0; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
     {
         float3 lightDir = Normalize(g_directionalLights[lightIndex].direction * -1.0f);
+
+        for (size_t shadowSample = 0; shadowSample < STRATIFIED_SHADOW_SAMPLE_COUNT(); ++shadowSample)
+        {
+            // TODO: optimize RandomVectorInsideCone. Maybe make it generate N like the python function, to amortize costs?
+            // TODO: a vector of 0, 0, 1 has problems. test for it in code!
+            float3 testDir = { 1.0f, -4.1f, 0.7f };
+            testDir = Normalize(testDir);
+            float3 randomDir = RandomVectorInsideCone(testDir, 0.01f, rng);
+
+            float dp = Dot(testDir, randomDir);
+            float length = Length(testDir);
+            int ijkl = 0;
+        }
 
         SHitInfo shadowHitInfo;
 
@@ -475,7 +624,7 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
         {
             std::random_device rd;
             std::mt19937 rng(rd());
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS()));
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
             // pixel size is 2x because uv goes from -1 to 1, so is twice as big.
             float pixelSizeU = 2.0f / float(output.m_width);
@@ -503,13 +652,13 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
                         float stratU = float((sampleIndex) % STRATIFIED_SAMPLE_COUNT_ONE_AXIS()) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS());
                         float stratV = float(((sampleIndex) / STRATIFIED_SAMPLE_COUNT_ONE_AXIS()) % STRATIFIED_SAMPLE_COUNT_ONE_AXIS()) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS());
 
-                        stratU += dist(rng);
-                        stratV += dist(rng);
+                        stratU += dist(rng) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS());
+                        stratV += dist(rng) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS());
 
                         stratU *= pixelSizeU;
                         stratV *= pixelSizeV;
 
-                        sampleSum = sampleSum + lambda(u + stratU, v + stratV);
+                        sampleSum = sampleSum + lambda(u + stratU, v + stratV, rng);
                     }
                     *(float3*)&output.m_pixels[pixelIndex * 3] = sampleSum / float(STRATIFIED_SAMPLE_COUNT());
 
@@ -551,11 +700,19 @@ int main (int argc, char** argv)
 
 TODO:
 
+* maybe don't pass uniform_real_distribution around, but yes pass mtl around.
+
 * point light
 * directional light
 * IBL?
 
+* optimize RandomVectorInsideCone after you see it working
+
+? combine directional and positional lights into one list?
+
 * analytical (many rays) vs ray marched (single ray)
+
+* could also do the buffer based one maybe.
 
 * white noise sampling vs blue noise sampling
 
@@ -564,6 +721,10 @@ TODO:
 * todos
 
 ? ambient lighting? or multibounce? (approaching path tracing then though...)
+
+Demos...
+1) Hard shadows
+2) Soft shadows
 
 BLOG:
 * Using stratified sampling, reinhard tone mapping, and gamma 2.2
