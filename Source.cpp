@@ -9,8 +9,9 @@
 #define IMAGE_WIDTH() 1024
 #define IMAGE_HEIGHT() 768
 
-#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 4  // it does this many samples squared per pixel for AA
+#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 2  // it does this many samples squared per pixel for AA
 
+// TODO: this is more just "square root of sample count" rename or something?
 #define STRATIFIED_SHADOW_SAMPLE_COUNT_ONE_AXIS() 4  // it does this many samples squared per pixel sample per light for shadow rays
 
 #define FORCE_SINGLE_THREADED() 0  // useful for debugging
@@ -177,6 +178,11 @@ inline float3x3 MultiplyVectorByTranspose(const float3& a)
         }
     }
     return ret;
+}
+
+inline float Lerp (float a, float b, float t)
+{
+    return a * (1.0f - t) + b * t;
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -456,14 +462,18 @@ static const SSphere g_spheres[] =
 
 static const SDirectionalLight g_directionalLights[] =
 {
-    {{-0.3f, -1.0f, 0.0f}, 1.0f, {0.0f, 0.0f, 0.0f}},
+    {{-0.3f, -1.0f, 0.0f}, 1.0f, {1.0f, 1.0f, 1.0f}},
 };
 
 static const SPositionalLight g_positionalLights[] =
 {
+#if 1
+    { { -4.0f, 5.0f, 5.0f },1.0f,{ 0.0f, 0.0f, 0.0f } },
+#else
     {{-4.0f, 5.0f, 5.0f},1.0f,{20.0f, 10.0f, 10.0f}},
     {{ 0.0f, 5.0f, 0.0f},1.0f,{10.0f, 20.0f, 10.0f}},
     {{ 4.0f, 5.0f, 5.0f},1.0f,{10.0f, 10.0f, 20.0f}},
+#endif
 };
 
 static const float  g_cameraDistance = 2.0f;
@@ -550,8 +560,11 @@ float3 PixelFunction (float u, float v, std::mt19937& rng)
     {
         float3 lightDir = Normalize(g_directionalLights[lightIndex].direction * -1.0f);
 
-        for (size_t shadowSample = 0; shadowSample < STRATIFIED_SHADOW_SAMPLE_COUNT(); ++shadowSample)
+        float shadowMultiplier = 1.0f;
+
+        for (size_t shadowSample = 1; shadowSample <= STRATIFIED_SHADOW_SAMPLE_COUNT(); ++shadowSample)
         {
+            /*
             // TODO: optimize RandomVectorInsideCone. Maybe make it generate N like the python function, to amortize costs?
             // TODO: a vector of 0, 0, 1 has problems. test for it in code!
             float3 testDir = { 1.0f, -4.1f, 0.7f };
@@ -561,8 +574,34 @@ float3 PixelFunction (float u, float v, std::mt19937& rng)
             float dp = Dot(testDir, randomDir);
             float length = Length(testDir);
             int ijkl = 0;
+            */
+
+            // TODO: point lights too!
+
+            // TODO: this angle is made up. use parameter on directional light
+
+            float3 randomDir = RandomVectorInsideCone(lightDir, 0.4f, rng);
+
+            SHitInfo shadowHitInfo;
+
+            bool intersectionFound = false;
+            for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
+                intersectionFound |= RayIntersect(shadowPos, randomDir, g_spheres[i], shadowHitInfo);
+            for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
+                intersectionFound |= RayIntersect(shadowPos, randomDir, g_quads[i], shadowHitInfo);
+
+            if (intersectionFound)
+                shadowMultiplier = Lerp(shadowMultiplier, 0.0f, 1.0f / float(shadowSample));
+            else
+                shadowMultiplier = Lerp(shadowMultiplier, 1.0f, 1.0f / float(shadowSample));
         }
 
+        float NdotL = Dot(lightDir, hitInfo.normal);
+        if (NdotL > 0.0f)
+            ret = ret + g_directionalLights[lightIndex].color * hitInfo.albedo * NdotL * shadowMultiplier;
+
+        // hard shadows
+        /*
         SHitInfo shadowHitInfo;
 
         bool intersectionFound = false;
@@ -577,6 +616,7 @@ float3 PixelFunction (float u, float v, std::mt19937& rng)
         float NdotL = Dot(lightDir, hitInfo.normal);
         if (NdotL > 0.0f)
             ret = ret + g_directionalLights[lightIndex].color * hitInfo.albedo * NdotL;
+            */
     }
 
     // apply positional lighting
@@ -724,7 +764,9 @@ TODO:
 
 Demos...
 1) Hard shadows
-2) Soft shadows
+2) stratified sampling
+3) stratified sampling with jitter
+4) cone
 
 BLOG:
 * Using stratified sampling, reinhard tone mapping, and gamma 2.2
