@@ -279,6 +279,11 @@ struct SImageData
 
     size_t Pitch () const { return m_width * 3; }
 
+    float* GetPixel(size_t x, size_t y)
+    {
+        return &m_pixels[y*Pitch() + x*3];
+    }
+
     size_t m_width;
     size_t m_height;
     std::vector<float> m_pixels;
@@ -721,7 +726,103 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
                 printf("\rProgress: 100%%\n");
         }
     );
-    output.Save(fileName);
+
+
+    // save the image
+    char buffer[256];
+    sprintf_s(buffer, fileName, "normal");
+    output.Save(buffer);
+
+    // 3x3 box filter
+    {
+        SImageData filtered(output.m_width, output.m_height);
+
+        float* outPixel = &filtered.m_pixels[0];
+        for (size_t y = 0; y < output.m_height; ++y)
+        {
+            for (size_t x = 0; x < output.m_width; ++x)
+            {
+                for (size_t channel = 0; channel < 3; ++channel)
+                {
+                    float value = 0.0f;
+
+                    size_t x0 = (x > 0) ? x - 1 : 0;
+                    size_t x1 = x;
+                    size_t x2 = (x < output.m_width - 1) ? x + 1 : x;
+
+                    size_t y0 = (y > 0) ? y - 1 : 0;
+                    size_t y1 = y;
+                    size_t y2 = (y < output.m_height - 1) ? y + 1 : y;
+
+                    value += output.GetPixel(x0, y0)[channel];
+                    value += output.GetPixel(x1, y0)[channel];
+                    value += output.GetPixel(x2, y0)[channel];
+
+                    value += output.GetPixel(x0, y1)[channel];
+                    value += output.GetPixel(x1, y1)[channel];
+                    value += output.GetPixel(x2, y1)[channel];
+
+                    value += output.GetPixel(x0, y2)[channel];
+                    value += output.GetPixel(x1, y2)[channel];
+                    value += output.GetPixel(x2, y2)[channel];
+
+                    value /= 9.0f;
+
+                    *outPixel = value;
+                    ++outPixel;
+                }
+            }
+        }
+
+        char buffer[256];
+        sprintf_s(buffer, fileName, "box");
+        filtered.Save(buffer);
+    }
+
+    // 3x3 median filter
+    {
+        SImageData filtered(output.m_width, output.m_height);
+        std::array<float, 9> samples;
+
+        float* outPixel = &filtered.m_pixels[0];
+        for (size_t y = 0; y < output.m_height; ++y)
+        {
+            for (size_t x = 0; x < output.m_width; ++x)
+            {
+                for (size_t channel = 0; channel < 3; ++channel)
+                {
+                    size_t x0 = (x > 0) ? x - 1 : 0;
+                    size_t x1 = x;
+                    size_t x2 = (x < output.m_width - 1) ? x + 1 : x;
+
+                    size_t y0 = (y > 0) ? y - 1 : 0;
+                    size_t y1 = y;
+                    size_t y2 = (y < output.m_height - 1) ? y + 1 : y;
+
+                    samples[0] = output.GetPixel(x0, y0)[channel];
+                    samples[1] = output.GetPixel(x1, y0)[channel];
+                    samples[2] = output.GetPixel(x2, y0)[channel];
+
+                    samples[3] = output.GetPixel(x0, y1)[channel];
+                    samples[4] = output.GetPixel(x1, y1)[channel];
+                    samples[5] = output.GetPixel(x2, y1)[channel];
+
+                    samples[6] = output.GetPixel(x0, y2)[channel];
+                    samples[7] = output.GetPixel(x1, y2)[channel];
+                    samples[8] = output.GetPixel(x2, y2)[channel];
+
+                    std::sort(samples.begin(), samples.end());
+
+                    *outPixel = samples[4];
+                    ++outPixel;
+                }
+            }
+        }
+
+        char buffer[256];
+        sprintf_s(buffer, fileName, "median");
+        filtered.Save(buffer);
+    }
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -730,7 +831,7 @@ int main (int argc, char** argv)
     for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]); ++i)
         g_quads[i].CalculateNormal();
 
-    GeneratePixels("Soft Shadows", "out.png", PixelFunction);
+    GeneratePixels("Soft Shadows", "out_%s.png", PixelFunction);
 
     system("pause");
     return 0;
@@ -740,7 +841,11 @@ int main (int argc, char** argv)
 
 TODO:
 
-* maybe don't pass uniform_real_distribution around, but yes pass mtl around.
+* try median and box filtering shadow data before applying lighting
+
+* try blue noise instead of white
+
+? other denoising? bilateral?
 
 * point light
 * directional light
@@ -750,7 +855,7 @@ TODO:
 
 ? combine directional and positional lights into one list?
 
-* analytical (many rays) vs ray marched (single ray)
+* analytical (many rays) vs ray marched (single ray that keeps track of closest)
 
 * could also do the buffer based one maybe.
 
@@ -761,6 +866,14 @@ TODO:
 * todos
 
 ? ambient lighting? or multibounce? (approaching path tracing then though...)
+
+* hard shadows
+* "path traced shadows"
+* compare vs path traced and make sure it converges with higher ray counts?
+* low variance early out
+* try denoising?
+* for 4x aa could calculate shadows once and re-use them
+* i think maybe shooting rays at a disc is the right move, and that ray in cone is not correct.
 
 Demos...
 1) Hard shadows
