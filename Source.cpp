@@ -23,6 +23,8 @@
 #pragma warning( disable : 4996 ) 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 #pragma warning( default : 4996 ) 
 
 typedef uint8_t uint8;
@@ -30,6 +32,7 @@ typedef std::array<float, 3> float3;
 typedef std::array<std::array<float, 3>, 3> float3x3;
 
 float LinearTosRGB(float value);
+float sRGBToLinear(float value);
 
 static const float c_rayEpsilon = 0.01f; // value used to push the ray a little bit away from surfaces before doing shadow rays
 static const float c_pi = 3.14159265359f;
@@ -253,35 +256,67 @@ float3 RandomVectorInsideCone (float3 coneDir, float coneAngle, std::mt19937& rn
 }
 
 //-------------------------------------------------------------------------------------------------------------------
+template <size_t NUM_COMPONENTS>
 struct SImageData
 {
-    SImageData (size_t width, size_t height)
+    SImageData (size_t width=0, size_t height=0)
         : m_width(width)
         , m_height(height)
     {
-        m_pixels.resize(m_width*m_height * 3);
+        m_pixels.resize(m_width*m_height * NUM_COMPONENTS);
     }
 
-    bool Save (const char* fileName)
+    bool Load (const char* fileName, bool isSRGB)
+    {
+        int width, height, components;
+        unsigned char* pixels = stbi_load(fileName, &width, &height, &components, NUM_COMPONENTS);
+
+        if (!pixels)
+            return false;
+
+        m_width = width;
+        m_height = height;
+        m_pixels.resize(m_width*m_height * NUM_COMPONENTS);
+
+        for (size_t i = 0; i < m_pixels.size(); ++i)
+        {
+            m_pixels[i] = float(pixels[i]) / 255.0f;
+            if (isSRGB)
+                m_pixels[i] = sRGBToLinear(m_pixels[i]);
+        }
+
+        stbi_image_free(pixels);
+
+        return true;
+    }
+
+    bool Save (const char* fileName, bool toSRGB)
     {
         // convert from linear f32 to sRGB u8
         std::vector<uint8> pixelsU8;
         pixelsU8.resize(m_pixels.size());
         for (size_t i = 0; i < m_pixels.size(); ++i)
         {
-            float toneMapped = m_pixels[i] / (m_pixels[i] + 1.0f);
-            pixelsU8[i] = uint8(LinearTosRGB(toneMapped)*255.0f);
+            if (toSRGB)
+            {
+                float toneMapped = m_pixels[i] / (m_pixels[i] + 1.0f);
+                pixelsU8[i] = uint8(LinearTosRGB(toneMapped)*255.0f);
+            }
+            else
+            {
+                pixelsU8[i] = uint8(m_pixels[i]*255.0f);
+            }
         }
 
         // save the image
-        return (stbi_write_png(fileName, (int)m_width, (int)m_height, 3, &pixelsU8[0], (int)Pitch()) == 1);
+        return (stbi_write_png(fileName, (int)m_width, (int)m_height, NUM_COMPONENTS, &pixelsU8[0], (int)Pitch()) == 1);
     }
 
-    size_t Pitch () const { return m_width * 3; }
+    size_t Pitch () const { return m_width * NUM_COMPONENTS; }
 
     float* GetPixel(size_t x, size_t y)
     {
-        return &m_pixels[y*Pitch() + x*3];
+        return &m_pixels[y*Pitch() + x* NUM_COMPONENTS];
     }
 
     size_t m_width;
@@ -489,6 +524,8 @@ static const float3 g_cameraZ = { 0.0f, 0.0f, 1.0f };
 
 static const float3 g_skyColor = { 135.0f / 255.0f, 206.0f / 255.0f, 235.0f / 255.0f };
 
+SImageData<4> g_blueNoiseTexture;
+
 //-------------------------------------------------------------------------------------------------------------------
 template <typename L>
 void RunMultiThreaded (const char* label, const L& lambda)
@@ -518,13 +555,16 @@ void RunMultiThreaded (const char* label, const L& lambda)
 }
 
 //-------------------------------------------------------------------------------------------------------------------
+float sRGBToLinear (float value)
+{
+    if (value < 0.04045f)
+        return value / 12.92f;
+    else
+        return std::powf(((value + 0.055f) / 1.055f), 2.4f);
+}
+
 float LinearTosRGB (float value)
 {
-    if (value > 1.0f)
-        return 1.0f;
-    else if (value < 0.0f)
-        return 0.0f;
-
     if (value < 0.0031308f)
         return value * 12.92f;
     else
@@ -532,6 +572,7 @@ float LinearTosRGB (float value)
 }
 
 //-------------------------------------------------------------------------------------------------------------------
+template <bool SOFT_SHADOWS>
 float3 PixelFunction (float u, float v, std::mt19937& rng)
 {
     // init pixel to black
@@ -567,61 +608,48 @@ float3 PixelFunction (float u, float v, std::mt19937& rng)
 
         float shadowMultiplier = 1.0f;
 
-        for (size_t shadowSample = 1; shadowSample <= STRATIFIED_SHADOW_SAMPLE_COUNT(); ++shadowSample)
+        if (SOFT_SHADOWS)
         {
-            /*
-            // TODO: optimize RandomVectorInsideCone. Maybe make it generate N like the python function, to amortize costs?
-            // TODO: a vector of 0, 0, 1 has problems. test for it in code!
-            float3 testDir = { 1.0f, -4.1f, 0.7f };
-            testDir = Normalize(testDir);
-            float3 randomDir = RandomVectorInsideCone(testDir, 0.01f, rng);
+            for (size_t shadowSample = 1; shadowSample <= STRATIFIED_SHADOW_SAMPLE_COUNT(); ++shadowSample)
+            {
+                // TODO: point lights too!
 
-            float dp = Dot(testDir, randomDir);
-            float length = Length(testDir);
-            int ijkl = 0;
-            */
+                // TODO: this angle is made up. use parameter on directional light
 
-            // TODO: point lights too!
+                float3 randomDir = RandomVectorInsideCone(lightDir, 0.4f, rng);
 
-            // TODO: this angle is made up. use parameter on directional light
+                SHitInfo shadowHitInfo;
 
-            float3 randomDir = RandomVectorInsideCone(lightDir, 0.4f, rng);
+                bool intersectionFound = false;
+                for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
+                    intersectionFound |= RayIntersect(shadowPos, randomDir, g_spheres[i], shadowHitInfo);
+                for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
+                    intersectionFound |= RayIntersect(shadowPos, randomDir, g_quads[i], shadowHitInfo);
 
+                if (intersectionFound)
+                    shadowMultiplier = Lerp(shadowMultiplier, 0.0f, 1.0f / float(shadowSample));
+                else
+                    shadowMultiplier = Lerp(shadowMultiplier, 1.0f, 1.0f / float(shadowSample));
+            }
+        }
+        else
+        {
             SHitInfo shadowHitInfo;
 
             bool intersectionFound = false;
             for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
-                intersectionFound |= RayIntersect(shadowPos, randomDir, g_spheres[i], shadowHitInfo);
+                intersectionFound |= RayIntersect(shadowPos, lightDir, g_spheres[i], shadowHitInfo);
             for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
-                intersectionFound |= RayIntersect(shadowPos, randomDir, g_quads[i], shadowHitInfo);
+                intersectionFound |= RayIntersect(shadowPos, lightDir, g_quads[i], shadowHitInfo);
 
             if (intersectionFound)
-                shadowMultiplier = Lerp(shadowMultiplier, 0.0f, 1.0f / float(shadowSample));
-            else
-                shadowMultiplier = Lerp(shadowMultiplier, 1.0f, 1.0f / float(shadowSample));
+                shadowMultiplier = 0.0f;
         }
 
         float NdotL = Dot(lightDir, hitInfo.normal);
         if (NdotL > 0.0f)
             ret = ret + g_directionalLights[lightIndex].color * hitInfo.albedo * NdotL * shadowMultiplier;
 
-        // hard shadows
-        /*
-        SHitInfo shadowHitInfo;
-
-        bool intersectionFound = false;
-        for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
-            intersectionFound |= RayIntersect(shadowPos, lightDir, g_spheres[i], shadowHitInfo);
-        for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
-            intersectionFound |= RayIntersect(shadowPos, lightDir, g_quads[i], shadowHitInfo);
-
-        if (intersectionFound)
-            continue;
-
-        float NdotL = Dot(lightDir, hitInfo.normal);
-        if (NdotL > 0.0f)
-            ret = ret + g_directionalLights[lightIndex].color * hitInfo.albedo * NdotL;
-            */
     }
 
     // apply positional lighting
@@ -658,7 +686,7 @@ float3 PixelFunction (float u, float v, std::mt19937& rng)
 template <typename LAMBDA>
 void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
 {
-    SImageData output(IMAGE_WIDTH(), IMAGE_HEIGHT());
+    SImageData<3> output(IMAGE_WIDTH(), IMAGE_HEIGHT());
     const size_t numPixels = output.m_width * output.m_height;
 
     float aspectRatio = float(output.m_width) / float(output.m_height);
@@ -731,11 +759,11 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
     // save the image
     char buffer[256];
     sprintf_s(buffer, fileName, "normal");
-    output.Save(buffer);
+    output.Save(buffer, true);
 
     // 3x3 box filter
     {
-        SImageData filtered(output.m_width, output.m_height);
+        SImageData<3> filtered(output.m_width, output.m_height);
 
         float* outPixel = &filtered.m_pixels[0];
         for (size_t y = 0; y < output.m_height; ++y)
@@ -776,12 +804,12 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
 
         char buffer[256];
         sprintf_s(buffer, fileName, "box");
-        filtered.Save(buffer);
+        filtered.Save(buffer, true);
     }
 
     // 3x3 median filter
     {
-        SImageData filtered(output.m_width, output.m_height);
+        SImageData<3> filtered(output.m_width, output.m_height);
         std::array<float, 9> samples;
 
         float* outPixel = &filtered.m_pixels[0];
@@ -821,17 +849,44 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
 
         char buffer[256];
         sprintf_s(buffer, fileName, "median");
-        filtered.Save(buffer);
+        filtered.Save(buffer, true);
     }
 }
 
 //-------------------------------------------------------------------------------------------------------------------
 int main (int argc, char** argv)
 {
+    // make a 4 channel blue noise tetxure
+    {
+        SImageData<3> blueNoiseTextures[4];
+        if (!blueNoiseTextures[0].Load("LDR_RGB1_0.png", false) ||
+            !blueNoiseTextures[1].Load("LDR_RGB1_1.png", false) ||
+            !blueNoiseTextures[2].Load("LDR_RGB1_2.png", false) ||
+            !blueNoiseTextures[3].Load("LDR_RGB1_3.png", false))
+        {
+            printf("Could not load the blue noise textures!\n");
+            return 1;
+        }
+
+        g_blueNoiseTexture.m_width = blueNoiseTextures[0].m_width;
+        g_blueNoiseTexture.m_height = blueNoiseTextures[0].m_height;
+        g_blueNoiseTexture.m_pixels.resize(g_blueNoiseTexture.m_height*g_blueNoiseTexture.Pitch());
+        for (size_t i = 0, c = blueNoiseTextures[0].m_width*blueNoiseTextures[0].m_height; i < c; ++i)
+        {
+            g_blueNoiseTexture.m_pixels[i * 4 + 0] = blueNoiseTextures[0].m_pixels[i * 3];
+            g_blueNoiseTexture.m_pixels[i * 4 + 1] = blueNoiseTextures[1].m_pixels[i * 3];
+            g_blueNoiseTexture.m_pixels[i * 4 + 2] = blueNoiseTextures[2].m_pixels[i * 3];
+            g_blueNoiseTexture.m_pixels[i * 4 + 3] = blueNoiseTextures[3].m_pixels[i * 3];
+        }
+    }
+
+    // init geometry
     for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]); ++i)
         g_quads[i].CalculateNormal();
 
-    GeneratePixels("Soft Shadows", "out_%s.png", PixelFunction);
+    // make images
+    GeneratePixels("Soft Shadows", "out_soft_%s.png", PixelFunction<true>);
+    GeneratePixels("Hard Shadows", "out_hard_%s.png", PixelFunction<false>);
 
     system("pause");
     return 0;
@@ -841,11 +896,25 @@ int main (int argc, char** argv)
 
 TODO:
 
+* maybe get rid of tone mapping
+
+* try gaussian blur too
+
+* there are some weird white dots in the output images, check em out!
+
+? i think maybe you should make the image data be 4 channels instead of 3. that would let you pack all four blue noise values in
+
+* if keeping the inside cone function, break it into two parts: one that makes the 3x3 matrix that is re-used, the other that makes the random vector
+
+* if multi sampling, re-use shadow info from first sample only?
+
 * try median and box filtering shadow data before applying lighting
 
 * try blue noise instead of white
 
 ? other denoising? bilateral?
+
+? try a larger median filter radius? 5x5 perhaps
 
 * point light
 * directional light
