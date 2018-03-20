@@ -11,13 +11,7 @@
 
 #define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 2  // it does this many samples squared per pixel for AA
 
-// TODO: this is more just "square root of sample count" rename or something?
-#define STRATIFIED_SHADOW_SAMPLE_COUNT_ONE_AXIS() 4  // it does this many samples squared per pixel sample per light for shadow rays
-
 #define FORCE_SINGLE_THREADED() 0  // useful for debugging
-
-
-
 
 // stb_image is an amazing header only image library (aka no linking, just include the headers!).  http://nothings.org/stb
 #pragma warning( disable : 4996 ) 
@@ -36,9 +30,9 @@ float sRGBToLinear(float value);
 
 static const float c_rayEpsilon = 0.01f; // value used to push the ray a little bit away from surfaces before doing shadow rays
 static const float c_pi = 3.14159265359f;
+static const float c_goldenRatioConjugate = 0.61803398875f;
 
 #define STRATIFIED_SAMPLE_COUNT() (STRATIFIED_SAMPLE_COUNT_ONE_AXIS()*STRATIFIED_SAMPLE_COUNT_ONE_AXIS())
-#define STRATIFIED_SHADOW_SAMPLE_COUNT() (STRATIFIED_SHADOW_SAMPLE_COUNT_ONE_AXIS()*STRATIFIED_SHADOW_SAMPLE_COUNT_ONE_AXIS())
 
 //-------------------------------------------------------------------------------------------------------------------
 
@@ -189,16 +183,16 @@ inline float Lerp (float a, float b, float t)
 }
 
 //-------------------------------------------------------------------------------------------------------------------
-float3 RandomVectorInsideCone (float3 coneDir, float coneAngle, std::mt19937& rng)
+float3 RandomVectorInsideCone (float3 coneDir, float coneAngle, float rngX, float rngY)
 {
     // Translated from: https://stackoverflow.com/questions/38997302/create-random-unit-vector-inside-a-defined-conical-region
 
 
     // Generate points on the spherical cap around the north pole [1].
     // [1] See https://math.stackexchange.com/a/205589/81266
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    float z = dist(rng) * (1.0f - std::cosf(coneAngle)) + std::cosf(coneAngle);
-    float phi = dist(rng) * 2.0f * c_pi;
+
+    float z = rngX * (1.0f - std::cosf(coneAngle)) + std::cosf(coneAngle);
+    float phi = rngY * 2.0f * c_pi;
     float x = std::sqrtf(1.0f - z * z) * std::cosf(phi);
     float y = std::sqrtf(1.0f - z * z) * std::sinf(phi);
 
@@ -299,8 +293,7 @@ struct SImageData
         {
             if (toSRGB)
             {
-                float toneMapped = m_pixels[i] / (m_pixels[i] + 1.0f);
-                pixelsU8[i] = uint8(LinearTosRGB(toneMapped)*255.0f);
+                pixelsU8[i] = uint8(LinearTosRGB(m_pixels[i])*255.0f);
             }
             else
             {
@@ -334,8 +327,8 @@ struct SPositionalLight
 
 struct SDirectionalLight
 {
-    float3 direction;  // could be latitude and longitude to save a float
-    float solidAngle;    // TODO: may be bad naming. This is the angle that the rays are allowed to deviate in.
+    float3 direction;
+    float solidAngleRadius;  
 
     float3 color;
 };
@@ -502,7 +495,7 @@ static const SSphere g_spheres[] =
 
 static const SDirectionalLight g_directionalLights[] =
 {
-    {{-0.3f, -1.0f, 0.0f}, 1.0f, {1.0f, 1.0f, 1.0f}},
+    {{-0.3f, -1.0f, 0.0f}, 0.2f, {1.0f, 1.0f, 1.0f}},
 };
 
 static const SPositionalLight g_positionalLights[] =
@@ -572,9 +565,27 @@ float LinearTosRGB (float value)
 }
 
 //-------------------------------------------------------------------------------------------------------------------
-template <bool SOFT_SHADOWS>
-float3 PixelFunction (float u, float v, std::mt19937& rng)
+
+enum class RayPattern
 {
+    None,
+    Grid,
+    Stratified
+};
+
+enum class RNGSource
+{
+    WhiteNoise,
+    Hash,
+    BlueNoiseGR
+};
+
+//-------------------------------------------------------------------------------------------------------------------
+template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE>
+float3 PixelFunction (float u, float v, size_t pixelX, size_t pixelY, std::mt19937& rng)
+{
+    // TODO: make all RNG_SOURCE types work!
+
     // init pixel to black
     float3 ret = { 0.0f, 0.0f, 0.0f };
 
@@ -608,42 +619,85 @@ float3 PixelFunction (float u, float v, std::mt19937& rng)
 
         float shadowMultiplier = 1.0f;
 
-        if (SOFT_SHADOWS)
+        for (size_t sampleIndex = 0; sampleIndex <= SHADOW_RAY_COUNT; ++sampleIndex)
         {
-            for (size_t shadowSample = 1; shadowSample <= STRATIFIED_SHADOW_SAMPLE_COUNT(); ++shadowSample)
+            float rngX, rngY;
+
+            switch (RNG_SOURCE)
             {
-                // TODO: point lights too!
+                case RNGSource::WhiteNoise:
+                {
+                    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                    rngX = dist(rng);
+                    rngY = dist(rng);
+                    break;
+                }
+                case RNGSource::Hash:
+                {
+                    break;
+                }
+                case RNGSource::BlueNoiseGR:
+                {
+                    size_t texX = pixelX % g_blueNoiseTexture.m_width;
+                    size_t texY = pixelY % g_blueNoiseTexture.m_height;
 
-                // TODO: this angle is made up. use parameter on directional light
+                    float* blueNoise = g_blueNoiseTexture.GetPixel(texX, texY);
+                    rngX = std::fmodf(blueNoise[0] + c_goldenRatioConjugate * float(sampleIndex), 1.0f);
+                    rngY = std::fmodf(blueNoise[1] + c_goldenRatioConjugate * float(sampleIndex), 1.0f);
 
-                float3 randomDir = RandomVectorInsideCone(lightDir, 0.4f, rng);
-
-                SHitInfo shadowHitInfo;
-
-                bool intersectionFound = false;
-                for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
-                    intersectionFound |= RayIntersect(shadowPos, randomDir, g_spheres[i], shadowHitInfo);
-                for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
-                    intersectionFound |= RayIntersect(shadowPos, randomDir, g_quads[i], shadowHitInfo);
-
-                if (intersectionFound)
-                    shadowMultiplier = Lerp(shadowMultiplier, 0.0f, 1.0f / float(shadowSample));
-                else
-                    shadowMultiplier = Lerp(shadowMultiplier, 1.0f, 1.0f / float(shadowSample));
+                    break;
+                }
+                static_assert(RNG_SOURCE >= RNGSource::WhiteNoise && RNG_SOURCE <= RNGSource::BlueNoiseGR, "RNG_SOURCE invalid");
             }
-        }
-        else
-        {
+
+
+            // calculate sample position
+            float sampleX, sampleY;
+            switch (RAY_PATTERN)
+            {
+                case RayPattern::None:
+                {
+                    sampleX = rngX;
+                    sampleY = rngY;
+                    break;
+                }
+                case RayPattern::Grid:
+                {
+                    if (SHADOW_RAY_COUNT_GRID_SIZE == 1)
+                    {
+                        sampleX = 0.5f;
+                        sampleY = 0.5f;
+                    }
+                    else
+                    {
+                        sampleX = float(sampleIndex % SHADOW_RAY_COUNT_GRID_SIZE) / float(SHADOW_RAY_COUNT_GRID_SIZE - 1);
+                        sampleY = float(sampleIndex / SHADOW_RAY_COUNT_GRID_SIZE) / float(SHADOW_RAY_COUNT_GRID_SIZE - 1);
+                    }
+                    break;
+                }
+                case RayPattern::Stratified:
+                {
+                    sampleX = (float(sampleIndex % SHADOW_RAY_COUNT_GRID_SIZE) + rngX) / float(SHADOW_RAY_COUNT_GRID_SIZE);
+                    sampleY = (float(sampleIndex / SHADOW_RAY_COUNT_GRID_SIZE) + rngY) / float(SHADOW_RAY_COUNT_GRID_SIZE);
+                    break;
+                }
+                static_assert(RAY_PATTERN >= RayPattern::None && RAY_PATTERN <= RayPattern::Stratified,"RAY_PATTERN invalid");
+            }
+
+            float3 randomDir = RandomVectorInsideCone(lightDir, g_directionalLights[lightIndex].solidAngleRadius, sampleX, sampleY);
+
             SHitInfo shadowHitInfo;
 
             bool intersectionFound = false;
             for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
-                intersectionFound |= RayIntersect(shadowPos, lightDir, g_spheres[i], shadowHitInfo);
+                intersectionFound |= RayIntersect(shadowPos, randomDir, g_spheres[i], shadowHitInfo);
             for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
-                intersectionFound |= RayIntersect(shadowPos, lightDir, g_quads[i], shadowHitInfo);
+                intersectionFound |= RayIntersect(shadowPos, randomDir, g_quads[i], shadowHitInfo);
 
             if (intersectionFound)
-                shadowMultiplier = 0.0f;
+                shadowMultiplier = Lerp(shadowMultiplier, 0.0f, 1.0f / float(1+sampleIndex));
+            else
+                shadowMultiplier = Lerp(shadowMultiplier, 1.0f, 1.0f / float(1+sampleIndex));
         }
 
         float NdotL = Dot(lightDir, hitInfo.normal);
@@ -731,7 +785,7 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
                         stratU *= pixelSizeU;
                         stratV *= pixelSizeV;
 
-                        sampleSum = sampleSum + lambda(u + stratU, v + stratV, rng);
+                        sampleSum = sampleSum + lambda(u + stratU, v + stratV, pixelIndex % output.m_width, pixelIndex / output.m_width, rng);
                     }
                     *(float3*)&output.m_pixels[pixelIndex * 3] = sampleSum / float(STRATIFIED_SAMPLE_COUNT());
 
@@ -885,8 +939,16 @@ int main (int argc, char** argv)
         g_quads[i].CalculateNormal();
 
     // make images
-    GeneratePixels("Soft Shadows", "out_soft_%s.png", PixelFunction<true>);
-    GeneratePixels("Hard Shadows", "out_hard_%s.png", PixelFunction<false>);
+
+    GeneratePixels("Grid", "out_grid_%s.png", PixelFunction<8, 3, RayPattern::Grid, RNGSource::WhiteNoise>);
+
+    GeneratePixels("White", "out_white_%s.png", PixelFunction<8, 3, RayPattern::None, RNGSource::WhiteNoise>);
+    GeneratePixels("Blue", "out_blue_%s.png", PixelFunction<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>);
+
+    GeneratePixels("Stratified White", "out_stratified_white_%s.png", PixelFunction<8, 3, RayPattern::Stratified, RNGSource::WhiteNoise>);
+    GeneratePixels("Stratified Blue", "out_stratified_blue_%s.png", PixelFunction<8, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>);
+
+    GeneratePixels("Hard", "out_hard_%s.png", PixelFunction<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>);
 
     system("pause");
     return 0;
@@ -896,25 +958,19 @@ int main (int argc, char** argv)
 
 TODO:
 
-* maybe get rid of tone mapping
+* Permutation options...
++ 1) Number of rays 
+- 2) Random number source: white noise, hash without sine, blue noise + golden ratio
+- 3) Filter in pre or in post
+- 4) Filter type: median, box, depth aware box
+- 5) filter size: 3, 5?
+- 6) Sample target: no target (path tracing?), disc, square. Cone or no?
+- 7) Multi sample (re-use shadow info from first sample though IMO). 4x SSAA
+- 8) Low variance early out. Dont forget the coprime number (5) for shuffling!
 
-* try gaussian blur too
+* try gaussian blur too?
 
 * there are some weird white dots in the output images, check em out!
-
-? i think maybe you should make the image data be 4 channels instead of 3. that would let you pack all four blue noise values in
-
-* if keeping the inside cone function, break it into two parts: one that makes the 3x3 matrix that is re-used, the other that makes the random vector
-
-* if multi sampling, re-use shadow info from first sample only?
-
-* try median and box filtering shadow data before applying lighting
-
-* try blue noise instead of white
-
-? other denoising? bilateral?
-
-? try a larger median filter radius? 5x5 perhaps
 
 * point light
 * directional light
@@ -924,11 +980,8 @@ TODO:
 
 ? combine directional and positional lights into one list?
 
-* analytical (many rays) vs ray marched (single ray that keeps track of closest)
-
-* could also do the buffer based one maybe.
-
-* white noise sampling vs blue noise sampling
+* ray marched shadows (single ray that keeps track of closest point)
+* maybe also that one implementation where it's 1 ray per pixel but then blurred data
 
 * animated & make an animated gif of results? (gif is low quality though... maybe ffmpeg?)
 
@@ -941,8 +994,9 @@ TODO:
 * compare vs path traced and make sure it converges with higher ray counts?
 * low variance early out
 * try denoising?
-* for 4x aa could calculate shadows once and re-use them
 * i think maybe shooting rays at a disc is the right move, and that ray in cone is not correct.
+
+? red/blue 3d? or nah...
 
 Demos...
 1) Hard shadows
