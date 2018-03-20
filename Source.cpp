@@ -495,7 +495,7 @@ static const SSphere g_spheres[] =
 
 static const SDirectionalLight g_directionalLights[] =
 {
-    {{-0.3f, -1.0f, 0.0f}, 0.2f, {1.0f, 1.0f, 1.0f}},
+    {{-0.3f, -1.0f, 0.0f}, 0.4f, {1.0f, 1.0f, 1.0f}},
 };
 
 static const SPositionalLight g_positionalLights[] =
@@ -957,6 +957,9 @@ int main (int argc, char** argv)
 /*
 
 TODO:
+
+* make it make a gbuffer in one pass, and then do lighting and shading in another
+ * that will make it easier for pre filtering and depth aware filtering
 
 * Permutation options...
 + 1) Number of rays 
