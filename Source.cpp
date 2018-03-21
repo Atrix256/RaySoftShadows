@@ -305,6 +305,8 @@ struct SImageData
         return (stbi_write_png(fileName, (int)m_width, (int)m_height, NUM_COMPONENTS, &pixelsU8[0], (int)Pitch()) == 1);
     }
 
+    size_t NumComponents () const { return NUM_COMPONENTS; }
+
     size_t Pitch () const { return m_width * NUM_COMPONENTS; }
 
     float* GetPixel(size_t x, size_t y)
@@ -361,7 +363,7 @@ struct SHitInfo
 {
     float collisionTime = -1.0f;
     float3 normal;
-    float3 albedo;
+    float3 albedo = { 0.0f, 0.0f, 0.0f };
 };
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -580,44 +582,38 @@ enum class RNGSource
     BlueNoiseGR
 };
 
+struct SGbufferPixel
+{
+    SHitInfo hitInfo;
+    float u, v;
+    float shadowMultipliersDirectional[sizeof(g_directionalLights) / sizeof(g_directionalLights[0])];
+    float shadowMultipliersPositional[sizeof(g_positionalLights) / sizeof(g_positionalLights[0])];
+};
+
 //-------------------------------------------------------------------------------------------------------------------
+
 template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE>
-float3 PixelFunction (float u, float v, size_t pixelX, size_t pixelY, std::mt19937& rng)
+SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixelY, std::mt19937& rng)
 {
     // TODO: make all RNG_SOURCE types work!
 
-    // init pixel to black
-    float3 ret = { 0.0f, 0.0f, 0.0f };
-
-    // calculate the ray
+    // raytrace to find primary ray intersection
     float3 rayPos = g_cameraPos;
-
-    float3 rayDir =
-        g_cameraX * u +
-        g_cameraY * v +
-        g_cameraZ * g_cameraDistance;
-
-    rayDir = Normalize(rayDir);
-
-    // raytrace
-    SHitInfo hitInfo;
+    float3 rayDir = Normalize(g_cameraX * u + g_cameraY * v + g_cameraZ * g_cameraDistance);
+    SGbufferPixel ret;
     for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]); ++i)
-        RayIntersect(rayPos, rayDir, g_spheres[i], hitInfo);
+        RayIntersect(rayPos, rayDir, g_spheres[i], ret.hitInfo);
     for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]); ++i)
-        RayIntersect(rayPos, rayDir, g_quads[i], hitInfo);
-
-    // if we missed, return sky color
-    if (hitInfo.collisionTime <= 0.0f)
-        return g_skyColor;
+        RayIntersect(rayPos, rayDir, g_quads[i], ret.hitInfo);
 
     // apply directional lighting
-    float3 pixelPos = rayPos + rayDir * hitInfo.collisionTime;
-    float3 shadowPos = pixelPos + hitInfo.normal * c_rayEpsilon;
+    float3 pixelPos = rayPos + rayDir * ret.hitInfo.collisionTime;
+    float3 shadowPos = pixelPos + ret.hitInfo.normal * c_rayEpsilon;
     for (size_t lightIndex = 0; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
     {
         float3 lightDir = Normalize(g_directionalLights[lightIndex].direction * -1.0f);
 
-        float shadowMultiplier = 1.0f;
+        ret.shadowMultipliersDirectional[lightIndex] = 1.0f;
 
         for (size_t sampleIndex = 0; sampleIndex <= SHADOW_RAY_COUNT; ++sampleIndex)
         {
@@ -649,7 +645,6 @@ float3 PixelFunction (float u, float v, size_t pixelX, size_t pixelY, std::mt199
                 }
                 static_assert(RNG_SOURCE >= RNGSource::WhiteNoise && RNG_SOURCE <= RNGSource::BlueNoiseGR, "RNG_SOURCE invalid");
             }
-
 
             // calculate sample position
             float sampleX, sampleY;
@@ -695,57 +690,52 @@ float3 PixelFunction (float u, float v, size_t pixelX, size_t pixelY, std::mt199
                 intersectionFound |= RayIntersect(shadowPos, randomDir, g_quads[i], shadowHitInfo);
 
             if (intersectionFound)
-                shadowMultiplier = Lerp(shadowMultiplier, 0.0f, 1.0f / float(1+sampleIndex));
+                ret.shadowMultipliersDirectional[lightIndex] = Lerp(ret.shadowMultipliersDirectional[lightIndex], 0.0f, 1.0f / float(1+sampleIndex));
             else
-                shadowMultiplier = Lerp(shadowMultiplier, 1.0f, 1.0f / float(1+sampleIndex));
+                ret.shadowMultipliersDirectional[lightIndex] = Lerp(ret.shadowMultipliersDirectional[lightIndex], 1.0f, 1.0f / float(1+sampleIndex));
         }
-
-        float NdotL = Dot(lightDir, hitInfo.normal);
-        if (NdotL > 0.0f)
-            ret = ret + g_directionalLights[lightIndex].color * hitInfo.albedo * NdotL * shadowMultiplier;
-
     }
 
-    // apply positional lighting
-    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+    // TODO: positional lights. Maybe make a common function or something
+
+    return ret;
+
+}
+
+float3 PixelFunctionShade (SGbufferPixel& gbufferData)
+{
+    float3 ret = { 0.0f, 0.0f, 0.0f };
+
+    if (gbufferData.hitInfo.collisionTime <= 0.0f)
+        return g_skyColor;
+
+    for (size_t lightIndex = 0; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
     {
-        float3 lightDir = g_positionalLights[lightIndex].position - shadowPos;
-        float lightDist = Length(lightDir);
-        lightDir = Normalize(lightDir);
+        float3 lightDir = Normalize(g_directionalLights[lightIndex].direction * -1.0f);
 
-        SHitInfo shadowHitInfo;
-        shadowHitInfo.collisionTime = lightDist; // only go until we hit the light
-
-        bool intersectionFound = false;
-        for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
-            intersectionFound |= RayIntersect(shadowPos, lightDir, g_spheres[i], shadowHitInfo);
-        for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]) && !intersectionFound; ++i)
-            intersectionFound |= RayIntersect(shadowPos, lightDir, g_quads[i], shadowHitInfo);
-
-        if (intersectionFound)
-            continue;
-
-        // squared falloff attenuation
-        float atten = 1.0f / (shadowHitInfo.collisionTime * shadowHitInfo.collisionTime);
-
-        float NdotL = Dot(lightDir, hitInfo.normal);
+        float NdotL = Dot(lightDir, gbufferData.hitInfo.normal);
         if (NdotL > 0.0f)
-            ret = ret + g_positionalLights[lightIndex].color * hitInfo.albedo * NdotL * atten;
+            ret = ret + g_directionalLights[lightIndex].color * gbufferData.hitInfo.albedo * NdotL * gbufferData.shadowMultipliersDirectional[lightIndex];
     }
+
+    // TODO: positional lights too!
 
     return ret;
 }
 
 //-------------------------------------------------------------------------------------------------------------------
-template <typename LAMBDA>
-void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
+template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE>
+void GeneratePixels(const char* task, const char* fileName)
 {
     SImageData<3> output(IMAGE_WIDTH(), IMAGE_HEIGHT());
     const size_t numPixels = output.m_width * output.m_height;
 
     float aspectRatio = float(output.m_width) / float(output.m_height);
 
-    // calculate image
+    std::vector<SGbufferPixel> gbuffer;
+    gbuffer.resize(numPixels*STRATIFIED_SAMPLE_COUNT());
+
+    // Generate gbuffer data
     RunMultiThreaded(task,
         [&] (std::atomic<size_t>& atomicRowIndex)
         {
@@ -776,6 +766,8 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
                     float3 sampleSum = { 0.0f, 0.0f, 0.0f };
                     for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
                     {
+                        SGbufferPixel& pixel = gbuffer[pixelIndex * 4 + sampleIndex];
+
                         float stratU = float((sampleIndex) % STRATIFIED_SAMPLE_COUNT_ONE_AXIS()) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS());
                         float stratV = float(((sampleIndex) / STRATIFIED_SAMPLE_COUNT_ONE_AXIS()) % STRATIFIED_SAMPLE_COUNT_ONE_AXIS()) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS());
 
@@ -785,9 +777,11 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
                         stratU *= pixelSizeU;
                         stratV *= pixelSizeV;
 
-                        sampleSum = sampleSum + lambda(u + stratU, v + stratV, pixelIndex % output.m_width, pixelIndex / output.m_width, rng);
+                        pixel.u = u + stratU;
+                        pixel.v = v + stratV;
+
+                        pixel = PixelFunctionGBuffer<SHADOW_RAY_COUNT, SHADOW_RAY_COUNT_GRID_SIZE, RAY_PATTERN, RNG_SOURCE>(pixel.u, pixel.v, pixelIndex % output.m_width, pixelIndex / output.m_width, rng);
                     }
-                    *(float3*)&output.m_pixels[pixelIndex * 3] = sampleSum / float(STRATIFIED_SAMPLE_COUNT());
 
                     // report progress
                     if (reportProgress)
@@ -795,7 +789,7 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
                         int newPercent = (int)(100.0f * float(pixelIndex) / float(numPixels));
                         if (oldPercent != newPercent)
                         {
-                            printf("\rProgress: %i%%", newPercent);
+                            printf("\rGbuffer: %i%%", newPercent);
                             oldPercent = newPercent;
                         }
                     }
@@ -805,14 +799,28 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
             }
 
             if (reportProgress)
-                printf("\rProgress: 100%%\n");
+                printf("\rGbuffer: 100%%\n");
         }
     );
 
+    // shade the pixels. Singlethreaded is fine.
+    float3* pixel = (float3*)&output.m_pixels[0];
+    SGbufferPixel* gbufferPixel = &gbuffer[0];
+    for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
+    {
+        *pixel = { 0.0f, 0.0f, 0.0f };
+        for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
+        {
+            *pixel = *pixel + PixelFunctionShade(*gbufferPixel);
+            gbufferPixel++;
+        }
+        *pixel = *pixel / float(STRATIFIED_SAMPLE_COUNT());
+        pixel++;
+    }
 
     // save the image
     char buffer[256];
-    sprintf_s(buffer, fileName, "normal");
+    sprintf_s(buffer, fileName, "");
     output.Save(buffer, true);
 
     // 3x3 box filter
@@ -857,7 +865,7 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
         }
 
         char buffer[256];
-        sprintf_s(buffer, fileName, "box");
+        sprintf_s(buffer, fileName, "_box");
         filtered.Save(buffer, true);
     }
 
@@ -902,7 +910,7 @@ void GeneratePixels(const char* task, const char* fileName, LAMBDA& lambda)
         }
 
         char buffer[256];
-        sprintf_s(buffer, fileName, "median");
+        sprintf_s(buffer, fileName, "_median");
         filtered.Save(buffer, true);
     }
 }
@@ -940,15 +948,15 @@ int main (int argc, char** argv)
 
     // make images
 
-    GeneratePixels("Grid", "out_grid_%s.png", PixelFunction<8, 3, RayPattern::Grid, RNGSource::WhiteNoise>);
+    GeneratePixels<8, 3, RayPattern::Grid, RNGSource::WhiteNoise>("Grid", "out_grid%s.png");
 
-    GeneratePixels("White", "out_white_%s.png", PixelFunction<8, 3, RayPattern::None, RNGSource::WhiteNoise>);
-    GeneratePixels("Blue", "out_blue_%s.png", PixelFunction<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise>("White", "out_white%s.png");
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue", "out_blue%s.png");
 
-    GeneratePixels("Stratified White", "out_stratified_white_%s.png", PixelFunction<8, 3, RayPattern::Stratified, RNGSource::WhiteNoise>);
-    GeneratePixels("Stratified Blue", "out_stratified_blue_%s.png", PixelFunction<8, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>);
+    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White", "out_stratified_white%s.png");
+    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue", "out_stratified_blue%s.png");
 
-    GeneratePixels("Hard", "out_hard_%s.png", PixelFunction<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>);
+    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out_hard%s.png");
 
     system("pause");
     return 0;
