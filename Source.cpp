@@ -5,9 +5,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <random>
+#include <algorithm>
 
-#define IMAGE_WIDTH() 1024
-#define IMAGE_HEIGHT() 768
+#define IMAGE_WIDTH() 400
+#define IMAGE_HEIGHT() 400
 
 #define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 2  // it does this many samples squared per pixel for AA
 
@@ -182,6 +183,17 @@ inline float Lerp (float a, float b, float t)
     return a * (1.0f - t) + b * t;
 }
 
+template <typename T>
+T clamp(T value, T min, T max)
+{
+    if (value <= min)
+        return min;
+    else if (value >= max)
+        return max;
+    else
+        return value;
+}
+
 //-------------------------------------------------------------------------------------------------------------------
 float3 RandomVectorInsideCone (float3 coneDir, float coneAngle, float rngX, float rngY)
 {
@@ -312,6 +324,11 @@ struct SImageData
     float* GetPixel(size_t x, size_t y)
     {
         return &m_pixels[y*Pitch() + x* NUM_COMPONENTS];
+    }
+
+    const float* GetPixel(size_t x, size_t y) const
+    {
+        return &m_pixels[y*Pitch() + x * NUM_COMPONENTS];
     }
 
     size_t m_width;
@@ -568,6 +585,113 @@ float LinearTosRGB (float value)
 
 //-------------------------------------------------------------------------------------------------------------------
 
+struct SGbufferPixel
+{
+    SHitInfo hitInfo;
+    float u, v;
+    float shadowMultipliersDirectional[sizeof(g_directionalLights) / sizeof(g_directionalLights[0])];
+    float shadowMultipliersPositional[sizeof(g_positionalLights) / sizeof(g_positionalLights[0])];
+};
+
+//-------------------------------------------------------------------------------------------------------------------
+
+template <int RADIUS, size_t COMPONENTS>
+void BoxBlur(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest)
+{
+    static const size_t numPixelsInFilter = (1 + RADIUS * 2) * (1 + RADIUS * 2);
+
+    dest = src;
+
+    float* outPixel = &dest.m_pixels[0];
+
+    for (int y = 0; y < dest.m_height; ++y)
+    {
+        for (int x = 0; x < dest.m_width; ++x)
+        {
+            for (size_t channel = 0; channel < COMPONENTS; ++channel)
+            {
+                *outPixel = 0.0f;
+
+                for (int offsetY = -RADIUS; offsetY <= RADIUS; ++offsetY)
+                {
+                    int sampleY = y + offsetY;
+                    sampleY = clamp(sampleY, 0, (int)dest.m_height - 1);
+
+                    for (int offsetX = -RADIUS; offsetX <= RADIUS; ++offsetX)
+                    {
+
+                        int sampleX = x + offsetX;
+                        sampleX = clamp(sampleX, 0, (int)dest.m_width - 1);
+                        
+                        *outPixel += src.GetPixel((size_t)sampleX, sampleY)[channel];
+                    }
+                }
+
+                *outPixel /= float(numPixelsInFilter);
+
+                ++outPixel;
+            }
+        }
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
+template <int RADIUS, size_t SAMPLES_PER_PIXEL>
+void BoxBlurShadowMultipliers (const std::vector<SGbufferPixel>& src, std::vector<SGbufferPixel>& dest, size_t width, size_t height)
+{
+    static const size_t numPixelsInFilter = (1 + RADIUS * 2) * (1 + RADIUS * 2);
+
+    dest = src;
+
+    SGbufferPixel* outPixel = &dest[0];
+
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            for (size_t sampleIndex = 0; sampleIndex < SAMPLES_PER_PIXEL; ++sampleIndex)
+            {
+                for (float& f : outPixel->shadowMultipliersDirectional)
+                    f = 0.0f;
+
+                for (float& f : outPixel->shadowMultipliersPositional)
+                    f = 0.0f;
+
+                for (int offsetY = -RADIUS; offsetY <= RADIUS; ++offsetY)
+                {
+                    int sampleY = y + offsetY;
+                    sampleY = clamp(sampleY, 0, (int)height - 1);
+
+                    for (int offsetX = -RADIUS; offsetX <= RADIUS; ++offsetX)
+                    {
+                        int sampleX = x + offsetX;
+                        sampleX = clamp(sampleX, 0, (int)width - 1);
+
+                        const SGbufferPixel& inPixel = src[(sampleY * width + sampleX) * SAMPLES_PER_PIXEL + sampleIndex];
+                        
+                        for (size_t index = 0; index < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++index)
+                            outPixel->shadowMultipliersDirectional[index] += inPixel.shadowMultipliersDirectional[index];
+
+                        for (size_t index = 0; index < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++index)
+                            outPixel->shadowMultipliersPositional[index] += inPixel.shadowMultipliersPositional[index];
+                    }
+                }
+
+                for (float& f : outPixel->shadowMultipliersDirectional)
+                    f /= float(numPixelsInFilter);
+
+                for (float& f : outPixel->shadowMultipliersPositional)
+                    f /= float(numPixelsInFilter);
+
+                ++outPixel;
+            }
+        }
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
 enum class RayPattern
 {
     None,
@@ -580,14 +704,6 @@ enum class RNGSource
     WhiteNoise,
     Hash,
     BlueNoiseGR
-};
-
-struct SGbufferPixel
-{
-    SHitInfo hitInfo;
-    float u, v;
-    float shadowMultipliersDirectional[sizeof(g_directionalLights) / sizeof(g_directionalLights[0])];
-    float shadowMultipliersPositional[sizeof(g_positionalLights) / sizeof(g_positionalLights[0])];
 };
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -724,9 +840,12 @@ float3 PixelFunctionShade (SGbufferPixel& gbufferData)
 }
 
 //-------------------------------------------------------------------------------------------------------------------
+
 template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE>
-void GeneratePixels(const char* task, const char* fileName)
+void GeneratePixels(const char* task, const char* baseFileName)
 {
+    char fileName[256];
+
     SImageData<3> output(IMAGE_WIDTH(), IMAGE_HEIGHT());
     const size_t numPixels = output.m_width * output.m_height;
 
@@ -809,69 +928,9 @@ void GeneratePixels(const char* task, const char* fileName)
         // TODO: which sample to use for shadows?
 
         std::vector<SGbufferPixel> gbufferFiltered;
-        gbufferFiltered = gbuffer;
+        BoxBlurShadowMultipliers<1, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
 
-        SGbufferPixel* outPixel = &gbufferFiltered[0];
-        SGbufferPixel* inPixel = &gbuffer[0];
-        for (size_t y = 0; y < output.m_height; ++y)
-        {
-            for (size_t x = 0; x < output.m_width; ++x)
-            {
-                size_t x0 = (x > 0) ? x - 1 : 0;
-                size_t x1 = x;
-                size_t x2 = (x < output.m_width - 1) ? x + 1 : x;
-
-                size_t y0 = (y > 0) ? y - 1 : 0;
-                size_t y1 = y;
-                size_t y2 = (y < output.m_height - 1) ? y + 1 : y;
-
-                for (size_t lightIndex = 0; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
-                    outPixel->shadowMultipliersDirectional[lightIndex] = 0.0f;
-
-                for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
-                    outPixel->shadowMultipliersPositional[lightIndex] = 0.0f;
-
-                auto GetData = [&] (size_t indexx, size_t indexy)
-                {
-                    SGbufferPixel& input = gbuffer[(indexy * output.m_width + indexx)*STRATIFIED_SAMPLE_COUNT()];
-
-                    for (size_t lightIndex = 0; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
-                        outPixel->shadowMultipliersDirectional[lightIndex] += input.shadowMultipliersDirectional[lightIndex];
-
-                    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
-                        outPixel->shadowMultipliersPositional[lightIndex] += input.shadowMultipliersDirectional[lightIndex];
-                };
-
-                GetData(x0, y0);
-                GetData(x1, y0);
-                GetData(x2, y0);
-
-                GetData(x0, y1);
-                GetData(x1, y1);
-                GetData(x2, y1);
-
-                GetData(x0, y2);
-                GetData(x1, y2);
-                GetData(x2, y2);
-
-                for (size_t lightIndex = 0; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
-                {
-                    outPixel->shadowMultipliersDirectional[lightIndex] /= 9.0f;
-                    for (size_t sampleIndex = 1; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
-                        outPixel[sampleIndex].shadowMultipliersDirectional[lightIndex] = outPixel->shadowMultipliersDirectional[lightIndex];
-                }
-
-                for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
-                {
-                    outPixel->shadowMultipliersPositional[lightIndex] /= 9.0f;
-                    for (size_t sampleIndex = 1; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
-                        outPixel[sampleIndex].shadowMultipliersPositional[lightIndex] = outPixel->shadowMultipliersPositional[lightIndex];
-                }
-
-                outPixel += 4;
-                inPixel += 4;
-            }
-        }
+        // TODO: need to make all gbuffer pixels take the first shadow samples, instead of doing multi sampled shadows below?
 
         // shade the pixels. Singlethreaded is fine.
         float3* pixel = (float3*)&output.m_pixels[0];
@@ -889,9 +948,98 @@ void GeneratePixels(const char* task, const char* fileName)
         }
 
         // save the image
-        char buffer[256];
-        sprintf_s(buffer, fileName, "_prebox");
-        output.Save(buffer, true);
+        sprintf_s(fileName, baseFileName, "_prebox3");
+        output.Save(fileName, true);
+    }
+
+    // 5x5 box filter gbuffer 
+    {
+        // TODO: don't box filter the super sampled data? or yes do it?
+        // TODO: which sample to use for shadows?
+
+        std::vector<SGbufferPixel> gbufferFiltered;
+        BoxBlurShadowMultipliers<2, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
+
+        // TODO: need to make all gbuffer pixels take the first shadow samples, instead of doing multi sampled shadows below?
+
+        // shade the pixels. Singlethreaded is fine.
+        float3* pixel = (float3*)&output.m_pixels[0];
+        SGbufferPixel* gbufferPixel = &gbufferFiltered[0];
+        for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
+        {
+            *pixel = { 0.0f, 0.0f, 0.0f };
+            for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
+            {
+                *pixel = *pixel + PixelFunctionShade(*gbufferPixel);
+                gbufferPixel++;
+            }
+            *pixel = *pixel / float(STRATIFIED_SAMPLE_COUNT());
+            pixel++;
+        }
+
+        // save the image
+        sprintf_s(fileName, baseFileName, "_prebox5");
+        output.Save(fileName, true);
+    }
+
+    // 7x7 box filter gbuffer 
+    {
+        // TODO: don't box filter the super sampled data? or yes do it?
+        // TODO: which sample to use for shadows?
+
+        std::vector<SGbufferPixel> gbufferFiltered;
+        BoxBlurShadowMultipliers<3, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
+
+        // TODO: need to make all gbuffer pixels take the first shadow samples, instead of doing multi sampled shadows below?
+
+        // shade the pixels. Singlethreaded is fine.
+        float3* pixel = (float3*)&output.m_pixels[0];
+        SGbufferPixel* gbufferPixel = &gbufferFiltered[0];
+        for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
+        {
+            *pixel = { 0.0f, 0.0f, 0.0f };
+            for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
+            {
+                *pixel = *pixel + PixelFunctionShade(*gbufferPixel);
+                gbufferPixel++;
+            }
+            *pixel = *pixel / float(STRATIFIED_SAMPLE_COUNT());
+            pixel++;
+        }
+
+        // save the image
+        sprintf_s(fileName, baseFileName, "_prebox7");
+        output.Save(fileName, true);
+    }
+
+    // 15x15 box filter gbuffer 
+    {
+        // TODO: don't box filter the super sampled data? or yes do it?
+        // TODO: which sample to use for shadows?
+
+        std::vector<SGbufferPixel> gbufferFiltered;
+        BoxBlurShadowMultipliers<7, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
+
+        // TODO: need to make all gbuffer pixels take the first shadow samples, instead of doing multi sampled shadows below?
+
+        // shade the pixels. Singlethreaded is fine.
+        float3* pixel = (float3*)&output.m_pixels[0];
+        SGbufferPixel* gbufferPixel = &gbufferFiltered[0];
+        for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
+        {
+            *pixel = { 0.0f, 0.0f, 0.0f };
+            for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
+            {
+                *pixel = *pixel + PixelFunctionShade(*gbufferPixel);
+                gbufferPixel++;
+            }
+            *pixel = *pixel / float(STRATIFIED_SAMPLE_COUNT());
+            pixel++;
+        }
+
+        // save the image
+        sprintf_s(fileName, baseFileName, "_prebox15");
+        output.Save(fileName, true);
     }
 
     // shade the pixels. Singlethreaded is fine.
@@ -910,54 +1058,16 @@ void GeneratePixels(const char* task, const char* fileName)
     }
 
     // save the image
-    char buffer[256];
-    sprintf_s(buffer, fileName, "");
-    output.Save(buffer, true);
+    sprintf_s(fileName, baseFileName, "");
+    output.Save(fileName, true);
 
     // 3x3 box filter
     {
-        SImageData<3> filtered(output.m_width, output.m_height);
+        SImageData<3> filtered;
+        BoxBlur<1>(output, filtered);
 
-        float* outPixel = &filtered.m_pixels[0];
-        for (size_t y = 0; y < output.m_height; ++y)
-        {
-            for (size_t x = 0; x < output.m_width; ++x)
-            {
-                for (size_t channel = 0; channel < 3; ++channel)
-                {
-                    float value = 0.0f;
-
-                    size_t x0 = (x > 0) ? x - 1 : 0;
-                    size_t x1 = x;
-                    size_t x2 = (x < output.m_width - 1) ? x + 1 : x;
-
-                    size_t y0 = (y > 0) ? y - 1 : 0;
-                    size_t y1 = y;
-                    size_t y2 = (y < output.m_height - 1) ? y + 1 : y;
-
-                    value += output.GetPixel(x0, y0)[channel];
-                    value += output.GetPixel(x1, y0)[channel];
-                    value += output.GetPixel(x2, y0)[channel];
-
-                    value += output.GetPixel(x0, y1)[channel];
-                    value += output.GetPixel(x1, y1)[channel];
-                    value += output.GetPixel(x2, y1)[channel];
-
-                    value += output.GetPixel(x0, y2)[channel];
-                    value += output.GetPixel(x1, y2)[channel];
-                    value += output.GetPixel(x2, y2)[channel];
-
-                    value /= 9.0f;
-
-                    *outPixel = value;
-                    ++outPixel;
-                }
-            }
-        }
-
-        char buffer[256];
-        sprintf_s(buffer, fileName, "_box");
-        filtered.Save(buffer, true);
+        sprintf_s(fileName, baseFileName, "_box");
+        filtered.Save(fileName, true);
     }
 
     // 3x3 median filter
@@ -1000,13 +1110,13 @@ void GeneratePixels(const char* task, const char* fileName)
             }
         }
 
-        char buffer[256];
-        sprintf_s(buffer, fileName, "_median");
-        filtered.Save(buffer, true);
+        sprintf_s(fileName, baseFileName, "_median");
+        filtered.Save(fileName, true);
     }
 }
 
 //-------------------------------------------------------------------------------------------------------------------
+
 int main (int argc, char** argv)
 {
     // make a 4 channel blue noise tetxure
@@ -1057,6 +1167,16 @@ int main (int argc, char** argv)
 
 TODO:
 
+* do seperable blurs?
+
+* make shading pixels a function, so easier to re-use
+
+* rename components to channels
+
+* try doing a blur where every 2x2 block is averaged. (a gbuffer blur! maybe depth aware)
+
+? organize into multiple files?
+
 * larger box filter? Especially on pre box
  * also try larger median filter
 * stuff is pretty verbose right now
@@ -1104,6 +1224,8 @@ TODO:
 * i think maybe shooting rays at a disc is the right move, and that ray in cone is not correct.
 
 ? red/blue 3d? or nah...
+
+? how does stratified sampling fit in for AA?
 
 Demos...
 1) Hard shadows
