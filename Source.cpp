@@ -1039,15 +1039,15 @@ int main (int argc, char** argv)
 
     // make images
 
-    GeneratePixels<8, 3, RayPattern::Grid, RNGSource::WhiteNoise>("Grid", "out_grid%s.png");
+    GeneratePixels<8, 3, RayPattern::Grid, RNGSource::WhiteNoise>("Grid", "out/grid%s.png");
 
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise>("White", "out_white%s.png");
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue", "out_blue%s.png");
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise>("White", "out/white%s.png");
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue", "out/blue%s.png");
 
-    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White", "out_stratified_white%s.png");
-    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue", "out_stratified_blue%s.png");
+    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White", "out/stratified_white%s.png");
+    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue", "out/stratified_blue%s.png");
 
-    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out_hard%s.png");
+    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard%s.png");
 
     system("pause");
     return 0;
@@ -1058,6 +1058,7 @@ int main (int argc, char** argv)
 TODO:
 
 * larger box filter? Especially on pre box
+ * also try larger median filter
 * stuff is pretty verbose right now
 
 * a better scene with more interesting geo and lights
