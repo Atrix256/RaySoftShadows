@@ -596,9 +596,13 @@ struct SGbufferPixel
 //-------------------------------------------------------------------------------------------------------------------
 
 template <int RADIUS, size_t COMPONENTS>
-void BoxBlur(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest)
+void Convolve (const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest, std::array<float, (1 + RADIUS * 2) * (1 + RADIUS * 2)>& kernel)
 {
-    static const size_t numPixelsInFilter = (1 + RADIUS * 2) * (1 + RADIUS * 2);
+    static const size_t numPixelsOneSide = (1 + RADIUS * 2);
+
+    float totalKernelWeight = 0.0f;
+    for (float f : kernel)
+        totalKernelWeight += f;
 
     dest = src;
 
@@ -619,16 +623,96 @@ void BoxBlur(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest)
 
                     for (int offsetX = -RADIUS; offsetX <= RADIUS; ++offsetX)
                     {
-
                         int sampleX = x + offsetX;
                         sampleX = clamp(sampleX, 0, (int)dest.m_width - 1);
                         
-                        *outPixel += src.GetPixel((size_t)sampleX, sampleY)[channel];
+                        *outPixel += src.GetPixel(sampleX, sampleY)[channel] * kernel[(offsetY + RADIUS) * numPixelsOneSide + (offsetX + RADIUS)];
                     }
                 }
 
-                *outPixel /= float(numPixelsInFilter);
+                *outPixel /= totalKernelWeight;
 
+                ++outPixel;
+            }
+        }
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
+template <int RADIUS, size_t COMPONENTS>
+void BoxBlur(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest)
+{
+    static const size_t numPixelsInFilter = (1 + RADIUS * 2) * (1 + RADIUS * 2);
+
+    std::array<float, numPixelsInFilter> kernel;
+
+    for (float& f : kernel)
+        f = 1.0f;
+
+    Convolve<RADIUS, COMPONENTS>(src, dest, kernel);
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
+template <int RADIUS, size_t COMPONENTS>
+void TriangleBlur(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest)
+{
+    static const size_t numPixelsOneSide = (1 + RADIUS * 2);
+    static const size_t numPixelsInFilter = numPixelsOneSide * numPixelsOneSide;
+
+    std::array<float, numPixelsInFilter> kernel;
+
+    for (size_t i = 0; i < numPixelsInFilter; ++i)
+    {
+        size_t x = i % numPixelsOneSide;
+        size_t y = i / numPixelsOneSide;
+
+        float triangleX = (x <= RADIUS) ? float(x + 1) : float(numPixelsOneSide - x);
+        float triangleY = (y <= RADIUS) ? float(y + 1) : float(numPixelsOneSide - y);
+
+        kernel[i] = triangleX * triangleY;
+    }
+
+    Convolve<RADIUS, COMPONENTS>(src, dest, kernel);
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
+template <int RADIUS, size_t COMPONENTS>
+void MedianFilter(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest)
+{
+    const size_t numPixelsOneSide = (1 + RADIUS * 2);
+    const size_t numPixelsInFilter = numPixelsOneSide * numPixelsOneSide;
+
+    std::array<float, numPixelsInFilter> samples;
+
+    dest = src;
+
+    float* outPixel = &dest.m_pixels[0];
+    for (int y = 0; y < dest.m_height; ++y)
+    {
+        for (int x = 0; x < dest.m_width; ++x)
+        {
+            for (size_t channel = 0; channel < COMPONENTS; ++channel)
+            {
+                for (int offsetY = -RADIUS; offsetY <= RADIUS; ++offsetY)
+                {
+                    int sampleY = y + offsetY;
+                    sampleY = clamp(sampleY, 0, (int)dest.m_height - 1);
+
+                    for (int offsetX = -RADIUS; offsetX <= RADIUS; ++offsetX)
+                    {
+                        int sampleX = x + offsetX;
+                        sampleX = clamp(sampleX, 0, (int)dest.m_width - 1);
+
+                        samples[(offsetX + RADIUS)*numPixelsOneSide + (offsetY+RADIUS)] = src.GetPixel(sampleX, sampleY)[channel];
+                    }
+                }
+
+                std::sort(samples.begin(), samples.end());
+
+                *outPixel = samples[numPixelsInFilter / 2];
                 ++outPixel;
             }
         }
@@ -842,7 +926,7 @@ float3 PixelFunctionShade (SGbufferPixel& gbufferData)
 //-------------------------------------------------------------------------------------------------------------------
 
 template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE>
-void GeneratePixels(const char* task, const char* baseFileName)
+void GeneratePixels(const char* task, const char* baseFileName, bool doPostProcessing)
 {
     char fileName[256];
 
@@ -1061,58 +1145,47 @@ void GeneratePixels(const char* task, const char* baseFileName)
     sprintf_s(fileName, baseFileName, "");
     output.Save(fileName, true);
 
-    // 3x3 box filter
+    if (doPostProcessing)
     {
         SImageData<3> filtered;
+
         BoxBlur<1>(output, filtered);
+        sprintf_s(fileName, baseFileName, "_box3");
+        filtered.Save(fileName, true);
 
-        sprintf_s(fileName, baseFileName, "_box");
+        BoxBlur<2>(output, filtered);
+        sprintf_s(fileName, baseFileName, "_box5");
+        filtered.Save(fileName, true);
+
+        BoxBlur<7>(output, filtered);
+        sprintf_s(fileName, baseFileName, "_box15");
+        filtered.Save(fileName, true);
+
+        TriangleBlur<1>(output, filtered);
+        sprintf_s(fileName, baseFileName, "_triangle3");
+        filtered.Save(fileName, true);
+
+        TriangleBlur<2>(output, filtered);
+        sprintf_s(fileName, baseFileName, "_triangle5");
+        filtered.Save(fileName, true);
+
+        TriangleBlur<7>(output, filtered);
+        sprintf_s(fileName, baseFileName, "_triangle15");
+        filtered.Save(fileName, true);
+
+        MedianFilter<1>(output, filtered);
+        sprintf_s(fileName, baseFileName, "_median3");
+        filtered.Save(fileName, true);
+
+        MedianFilter<2>(output, filtered);
+        sprintf_s(fileName, baseFileName, "_median5");
+        filtered.Save(fileName, true);
+
+        MedianFilter<7>(output, filtered);
+        sprintf_s(fileName, baseFileName, "_median15");
         filtered.Save(fileName, true);
     }
 
-    // 3x3 median filter
-    {
-        SImageData<3> filtered(output.m_width, output.m_height);
-        std::array<float, 9> samples;
-
-        float* outPixel = &filtered.m_pixels[0];
-        for (size_t y = 0; y < output.m_height; ++y)
-        {
-            for (size_t x = 0; x < output.m_width; ++x)
-            {
-                for (size_t channel = 0; channel < 3; ++channel)
-                {
-                    size_t x0 = (x > 0) ? x - 1 : 0;
-                    size_t x1 = x;
-                    size_t x2 = (x < output.m_width - 1) ? x + 1 : x;
-
-                    size_t y0 = (y > 0) ? y - 1 : 0;
-                    size_t y1 = y;
-                    size_t y2 = (y < output.m_height - 1) ? y + 1 : y;
-
-                    samples[0] = output.GetPixel(x0, y0)[channel];
-                    samples[1] = output.GetPixel(x1, y0)[channel];
-                    samples[2] = output.GetPixel(x2, y0)[channel];
-
-                    samples[3] = output.GetPixel(x0, y1)[channel];
-                    samples[4] = output.GetPixel(x1, y1)[channel];
-                    samples[5] = output.GetPixel(x2, y1)[channel];
-
-                    samples[6] = output.GetPixel(x0, y2)[channel];
-                    samples[7] = output.GetPixel(x1, y2)[channel];
-                    samples[8] = output.GetPixel(x2, y2)[channel];
-
-                    std::sort(samples.begin(), samples.end());
-
-                    *outPixel = samples[4];
-                    ++outPixel;
-                }
-            }
-        }
-
-        sprintf_s(fileName, baseFileName, "_median");
-        filtered.Save(fileName, true);
-    }
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -1149,15 +1222,22 @@ int main (int argc, char** argv)
 
     // make images
 
-    GeneratePixels<8, 3, RayPattern::Grid, RNGSource::WhiteNoise>("Grid", "out/grid%s.png");
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise>("White 1", "out/white_1%s.png", true);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise>("White 8", "out/white_8%s.png", false);
 
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise>("White", "out/white%s.png");
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue", "out/blue%s.png");
+    GeneratePixels<8, 3, RayPattern::Grid, RNGSource::WhiteNoise>("Grid 8", "out/grid_8%s.png", false);
 
-    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White", "out/stratified_white%s.png");
-    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue", "out/stratified_blue%s.png");
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 1", "out/blue_1%s.png", false);
+    GeneratePixels<2, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 2", "out/blue_2%s.png", false);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 8", "out/blue_8%s.png", false);
 
-    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard%s.png");
+
+    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White 8", "out/stratified_white_8%s.png", false);
+    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 8", "out/stratified_blue_8%s.png", false);
+
+    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 4", "out/stratified4_blue_4%s.png", false);
+
+    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard_1%s.png", false);
 
     system("pause");
     return 0;
@@ -1166,6 +1246,10 @@ int main (int argc, char** argv)
 /*
 
 TODO:
+
+* do a blur where you blur NxN sections instead of each pixel reading every other pixel. This simulates something more quickly / easily done in a ray dispatch shader
+
+* flags with behaviors -> don't need to post blur or post median everything. Don't need 15x15 pre blur for everything!
 
 * do seperable blurs?
 
@@ -1227,6 +1311,8 @@ TODO:
 
 ? how does stratified sampling fit in for AA?
 
+* try to find good results
+
 Demos...
 1) Hard shadows
 2) stratified sampling
@@ -1234,6 +1320,8 @@ Demos...
 4) cone
 
 BLOG:
-* Using stratified sampling, reinhard tone mapping, and gamma 2.2
+* Using gamma 2.2
+* box, triangle, gaussian are separable which is faster
+? is median seprable?
 
 */
