@@ -296,7 +296,7 @@ struct SImageData
         return true;
     }
 
-    bool Save (const char* fileName, bool toSRGB)
+    bool Save (const char* fileName, bool toSRGB = true)
     {
         // convert from linear f32 to sRGB u8
         std::vector<uint8> pixelsU8;
@@ -902,7 +902,7 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
 
 }
 
-float3 PixelFunctionShade (SGbufferPixel& gbufferData)
+float3 PixelFunctionShade (const SGbufferPixel& gbufferData)
 {
     float3 ret = { 0.0f, 0.0f, 0.0f };
 
@@ -925,8 +925,27 @@ float3 PixelFunctionShade (SGbufferPixel& gbufferData)
 
 //-------------------------------------------------------------------------------------------------------------------
 
+template <size_t GBUFFER_SAMPLES, size_t USE_GBUFFER_SAMPLES>
+void ShadePixels(const std::vector<SGbufferPixel>& gbuffer, SImageData<3>& output)
+{
+    float3* pixel = (float3*)&output.m_pixels[0];
+    const SGbufferPixel* gbufferPixel = &gbuffer[0];
+    const size_t numPixels = gbuffer.size() / GBUFFER_SAMPLES;
+    for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
+    {
+        *pixel = { 0.0f, 0.0f, 0.0f };
+        for (size_t sampleIndex = 0; sampleIndex < USE_GBUFFER_SAMPLES; ++sampleIndex)
+            *pixel = *pixel + PixelFunctionShade(gbufferPixel[sampleIndex]);
+        gbufferPixel += GBUFFER_SAMPLES;
+        *pixel = *pixel / float(USE_GBUFFER_SAMPLES);
+        pixel++;
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
 template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE>
-void GeneratePixels(const char* task, const char* baseFileName, bool doPostProcessing)
+void GeneratePixels(const char* task, const char* baseFileName, bool doPreProcessing, bool doPostProcessing)
 {
     char fileName[256];
 
@@ -1006,186 +1025,81 @@ void GeneratePixels(const char* task, const char* baseFileName, bool doPostProce
         }
     );
 
-    // 3x3 box filter gbuffer 
+    // do gbuffer processing if we should
+    if (doPreProcessing)
     {
-        // TODO: don't box filter the super sampled data? or yes do it?
-        // TODO: which sample to use for shadows?
-
+        // only use the first shadow sample for shading when processing the gbuffer - aka no shadow data multi sampling.
         std::vector<SGbufferPixel> gbufferFiltered;
+
         BoxBlurShadowMultipliers<1, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
-
-        // TODO: need to make all gbuffer pixels take the first shadow samples, instead of doing multi sampled shadows below?
-
-        // shade the pixels. Singlethreaded is fine.
-        float3* pixel = (float3*)&output.m_pixels[0];
-        SGbufferPixel* gbufferPixel = &gbufferFiltered[0];
-        for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
-        {
-            *pixel = { 0.0f, 0.0f, 0.0f };
-            for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
-            {
-                *pixel = *pixel + PixelFunctionShade(*gbufferPixel);
-                gbufferPixel++;
-            }
-            *pixel = *pixel / float(STRATIFIED_SAMPLE_COUNT());
-            pixel++;
-        }
-
-        // save the image
+        ShadePixels<STRATIFIED_SAMPLE_COUNT(), 1>(gbufferFiltered, output);
         sprintf_s(fileName, baseFileName, "_prebox3");
-        output.Save(fileName, true);
-    }
+        output.Save(fileName);
 
-    // 5x5 box filter gbuffer 
-    {
-        // TODO: don't box filter the super sampled data? or yes do it?
-        // TODO: which sample to use for shadows?
-
-        std::vector<SGbufferPixel> gbufferFiltered;
         BoxBlurShadowMultipliers<2, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
-
-        // TODO: need to make all gbuffer pixels take the first shadow samples, instead of doing multi sampled shadows below?
-
-        // shade the pixels. Singlethreaded is fine.
-        float3* pixel = (float3*)&output.m_pixels[0];
-        SGbufferPixel* gbufferPixel = &gbufferFiltered[0];
-        for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
-        {
-            *pixel = { 0.0f, 0.0f, 0.0f };
-            for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
-            {
-                *pixel = *pixel + PixelFunctionShade(*gbufferPixel);
-                gbufferPixel++;
-            }
-            *pixel = *pixel / float(STRATIFIED_SAMPLE_COUNT());
-            pixel++;
-        }
-
-        // save the image
+        ShadePixels<STRATIFIED_SAMPLE_COUNT(), 1>(gbufferFiltered, output);
         sprintf_s(fileName, baseFileName, "_prebox5");
-        output.Save(fileName, true);
-    }
+        output.Save(fileName);
 
-    // 7x7 box filter gbuffer 
-    {
-        // TODO: don't box filter the super sampled data? or yes do it?
-        // TODO: which sample to use for shadows?
-
-        std::vector<SGbufferPixel> gbufferFiltered;
         BoxBlurShadowMultipliers<3, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
-
-        // TODO: need to make all gbuffer pixels take the first shadow samples, instead of doing multi sampled shadows below?
-
-        // shade the pixels. Singlethreaded is fine.
-        float3* pixel = (float3*)&output.m_pixels[0];
-        SGbufferPixel* gbufferPixel = &gbufferFiltered[0];
-        for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
-        {
-            *pixel = { 0.0f, 0.0f, 0.0f };
-            for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
-            {
-                *pixel = *pixel + PixelFunctionShade(*gbufferPixel);
-                gbufferPixel++;
-            }
-            *pixel = *pixel / float(STRATIFIED_SAMPLE_COUNT());
-            pixel++;
-        }
-
-        // save the image
+        ShadePixels<STRATIFIED_SAMPLE_COUNT(), 1>(gbufferFiltered, output);
         sprintf_s(fileName, baseFileName, "_prebox7");
-        output.Save(fileName, true);
-    }
+        output.Save(fileName);
 
-    // 15x15 box filter gbuffer 
-    {
-        // TODO: don't box filter the super sampled data? or yes do it?
-        // TODO: which sample to use for shadows?
-
-        std::vector<SGbufferPixel> gbufferFiltered;
         BoxBlurShadowMultipliers<7, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
-
-        // TODO: need to make all gbuffer pixels take the first shadow samples, instead of doing multi sampled shadows below?
-
-        // shade the pixels. Singlethreaded is fine.
-        float3* pixel = (float3*)&output.m_pixels[0];
-        SGbufferPixel* gbufferPixel = &gbufferFiltered[0];
-        for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
-        {
-            *pixel = { 0.0f, 0.0f, 0.0f };
-            for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
-            {
-                *pixel = *pixel + PixelFunctionShade(*gbufferPixel);
-                gbufferPixel++;
-            }
-            *pixel = *pixel / float(STRATIFIED_SAMPLE_COUNT());
-            pixel++;
-        }
-
-        // save the image
+        ShadePixels<STRATIFIED_SAMPLE_COUNT(), 1>(gbufferFiltered, output);
         sprintf_s(fileName, baseFileName, "_prebox15");
-        output.Save(fileName, true);
+        output.Save(fileName);
     }
 
-    // shade the pixels. Singlethreaded is fine.
-    float3* pixel = (float3*)&output.m_pixels[0];
-    SGbufferPixel* gbufferPixel = &gbuffer[0];
-    for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
+    // make and save the unprocessed image
     {
-        *pixel = { 0.0f, 0.0f, 0.0f };
-        for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
-        {
-            *pixel = *pixel + PixelFunctionShade(*gbufferPixel);
-            gbufferPixel++;
-        }
-        *pixel = *pixel / float(STRATIFIED_SAMPLE_COUNT());
-        pixel++;
+        ShadePixels<STRATIFIED_SAMPLE_COUNT(), STRATIFIED_SAMPLE_COUNT()>(gbuffer, output);
+        sprintf_s(fileName, baseFileName, "");
+        output.Save(fileName);
     }
 
-    // save the image
-    sprintf_s(fileName, baseFileName, "");
-    output.Save(fileName, true);
-
+    // do image post processing if we should
     if (doPostProcessing)
     {
         SImageData<3> filtered;
 
         BoxBlur<1>(output, filtered);
         sprintf_s(fileName, baseFileName, "_box3");
-        filtered.Save(fileName, true);
+        filtered.Save(fileName);
 
         BoxBlur<2>(output, filtered);
         sprintf_s(fileName, baseFileName, "_box5");
-        filtered.Save(fileName, true);
+        filtered.Save(fileName);
 
         BoxBlur<7>(output, filtered);
         sprintf_s(fileName, baseFileName, "_box15");
-        filtered.Save(fileName, true);
+        filtered.Save(fileName);
 
         TriangleBlur<1>(output, filtered);
         sprintf_s(fileName, baseFileName, "_triangle3");
-        filtered.Save(fileName, true);
+        filtered.Save(fileName);
 
         TriangleBlur<2>(output, filtered);
         sprintf_s(fileName, baseFileName, "_triangle5");
-        filtered.Save(fileName, true);
+        filtered.Save(fileName);
 
         TriangleBlur<7>(output, filtered);
         sprintf_s(fileName, baseFileName, "_triangle15");
-        filtered.Save(fileName, true);
+        filtered.Save(fileName);
 
         MedianFilter<1>(output, filtered);
         sprintf_s(fileName, baseFileName, "_median3");
-        filtered.Save(fileName, true);
+        filtered.Save(fileName);
 
         MedianFilter<2>(output, filtered);
         sprintf_s(fileName, baseFileName, "_median5");
-        filtered.Save(fileName, true);
+        filtered.Save(fileName);
 
         MedianFilter<7>(output, filtered);
         sprintf_s(fileName, baseFileName, "_median15");
-        filtered.Save(fileName, true);
+        filtered.Save(fileName);
     }
-
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -1222,22 +1136,28 @@ int main (int argc, char** argv)
 
     // make images
 
-    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise>("White 1", "out/white_1%s.png", true);
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise>("White 8", "out/white_8%s.png", false);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise>("White 1", "out/white_1%s.png", true, true);
+    GeneratePixels<2, 3, RayPattern::None, RNGSource::WhiteNoise>("White 2", "out/white_2%s.png", true, false);
+    GeneratePixels<4, 3, RayPattern::None, RNGSource::WhiteNoise>("White 4", "out/white_4%s.png", true, false);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise>("White 8", "out/white_8%s.png", true, false);
+    GeneratePixels<64, 3, RayPattern::None, RNGSource::WhiteNoise>("White 64", "out/white_64%s.png", false, false);
+    GeneratePixels<256, 3, RayPattern::None, RNGSource::WhiteNoise>("White 256", "out/white_256%s.png", false, false);
 
-    GeneratePixels<8, 3, RayPattern::Grid, RNGSource::WhiteNoise>("Grid 8", "out/grid_8%s.png", false);
+    GeneratePixels<8, 3, RayPattern::Grid, RNGSource::WhiteNoise>("Grid 8", "out/grid_8%s.png", true, false);
 
-    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 1", "out/blue_1%s.png", false);
-    GeneratePixels<2, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 2", "out/blue_2%s.png", false);
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 8", "out/blue_8%s.png", false);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 1", "out/blue_1%s.png", true, false);
+    GeneratePixels<2, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 2", "out/blue_2%s.png", true, false);
+    GeneratePixels<4, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 4", "out/blue_4%s.png", true, false);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 8", "out/blue_8%s.png", true, false);
+    GeneratePixels<64, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 64", "out/blue_64%s.png", false, false);
+    GeneratePixels<256, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 256", "out/blue_256%s.png", false, false);
 
+    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White 8", "out/stratified_white_8%s.png", true, false);
+    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 8", "out/stratified_blue_8%s.png", true, false);
 
-    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White 8", "out/stratified_white_8%s.png", false);
-    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 8", "out/stratified_blue_8%s.png", false);
+    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 4", "out/stratified4_blue_4%s.png", true, false);
 
-    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 4", "out/stratified4_blue_4%s.png", false);
-
-    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard_1%s.png", false);
+    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard_1%s.png", false, false);
 
     system("pause");
     return 0;
@@ -1247,11 +1167,11 @@ int main (int argc, char** argv)
 
 TODO:
 
+* 1 sample blue noise has a white dot in the shadow, need to look into it.
+
+! need to shoot at disc instead of doing the cone thing. get rid of cone thing.
+
 * do a blur where you blur NxN sections instead of each pixel reading every other pixel. This simulates something more quickly / easily done in a ray dispatch shader
-
-* flags with behaviors -> don't need to post blur or post median everything. Don't need 15x15 pre blur for everything!
-
-* do seperable blurs?
 
 * make shading pixels a function, so easier to re-use
 
