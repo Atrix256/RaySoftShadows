@@ -197,17 +197,22 @@ T clamp(T value, T min, T max)
 //-------------------------------------------------------------------------------------------------------------------
 float3 RandomVectorTowardsLight (float3 lightDir, float lightSolidAngleRadius, float rngX, float rngY)
 {
+    // TODO: should directional lights always store this value?
+    float radius = sinf(lightSolidAngleRadius);
+
     // make basis vectors for the light quad
-    float3 lightQuadUAxis = Cross(float3{ 0.0f, 1.0f, 0.0f }, lightDir);
-    float3 lightQuadVAxis = Cross(lightDir, lightQuadUAxis);
+    lightDir = Normalize(lightDir);
+    float3 lightQuadUAxis = Normalize(Cross(float3{ 0.0f, 1.0f, 0.0f }, lightDir));
+    float3 lightQuadVAxis = Normalize(Cross(lightDir, lightQuadUAxis));
 
-    // make rng values from [0,1] to [-1,1]
-    rngX = rngX * 2.0f - 1.0f;
-    rngY = rngY * 2.0f - 1.0f;
+    // make rng values from [0,1] to [-radius,radius]
+    rngX = (rngX * 2.0f - 1.0f) * radius;
+    rngY = (rngY * 2.0f - 1.0f) * radius;
 
-    float3 lightTarget = lightDir + lightQuadUAxis * rngX + lightQuadVAxis * rngY;
+    // return the ray
+    return Normalize(lightDir + lightQuadUAxis * rngX + lightQuadVAxis * rngY);
 
-    return Normalize(lightTarget);
+    // TODO: this is a quad, should switch to disc
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -884,6 +889,9 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                         sampleX = float(sampleIndex % SHADOW_RAY_COUNT_GRID_SIZE) / float(SHADOW_RAY_COUNT_GRID_SIZE - 1);
                         sampleY = float(sampleIndex / SHADOW_RAY_COUNT_GRID_SIZE) / float(SHADOW_RAY_COUNT_GRID_SIZE - 1);
                     }
+
+                    // TODO: should we add a half cell for grid? i think so!
+
                     break;
                 }
                 case RayPattern::Stratified:
@@ -942,7 +950,7 @@ float3 PixelFunctionShade (const SGbufferPixel& gbufferData)
 
 //-------------------------------------------------------------------------------------------------------------------
 
-template <size_t GBUFFER_SAMPLES, size_t USE_GBUFFER_SAMPLES>
+template <size_t GBUFFER_SAMPLES>
 void ShadePixels(const std::vector<SGbufferPixel>& gbuffer, SImageData<3>& output)
 {
     float3* pixel = (float3*)&output.m_pixels[0];
@@ -951,10 +959,10 @@ void ShadePixels(const std::vector<SGbufferPixel>& gbuffer, SImageData<3>& outpu
     for (size_t pixelIndex = 0; pixelIndex < numPixels; ++pixelIndex)
     {
         *pixel = { 0.0f, 0.0f, 0.0f };
-        for (size_t sampleIndex = 0; sampleIndex < USE_GBUFFER_SAMPLES; ++sampleIndex)
+        for (size_t sampleIndex = 0; sampleIndex < GBUFFER_SAMPLES; ++sampleIndex)
             *pixel = *pixel + PixelFunctionShade(gbufferPixel[sampleIndex]);
         gbufferPixel += GBUFFER_SAMPLES;
-        *pixel = *pixel / float(USE_GBUFFER_SAMPLES);
+        *pixel = *pixel / float(GBUFFER_SAMPLES);
         pixel++;
     }
 }
@@ -1045,33 +1053,43 @@ void GeneratePixels(const char* task, const char* baseFileName, bool doPreProces
     // do gbuffer processing if we should
     if (doPreProcessing)
     {
-        // only use the first shadow sample for shading when processing the gbuffer - aka no shadow data multi sampling.
+        // for pre-processing the gbuffer, we want it to be as if we only took 1 shadow sample per pixel before filtering.
+        std::vector<SGbufferPixel> gbuffer1ShadowSample = gbuffer;
+        for (SGbufferPixel& pixel : gbuffer1ShadowSample)
+        {
+            for (size_t lightIndex = 1; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
+                pixel.shadowMultipliersDirectional[lightIndex] = pixel.shadowMultipliersDirectional[0];
+
+            for (size_t lightIndex = 1; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+                pixel.shadowMultipliersPositional[lightIndex] = pixel.shadowMultipliersPositional[0];
+        }
+
         std::vector<SGbufferPixel> gbufferFiltered;
 
-        BoxBlurShadowMultipliers<1, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
-        ShadePixels<STRATIFIED_SAMPLE_COUNT(), 1>(gbufferFiltered, output);
+        BoxBlurShadowMultipliers<1, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
         sprintf_s(fileName, baseFileName, "_prebox3");
         output.Save(fileName);
 
-        BoxBlurShadowMultipliers<2, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
-        ShadePixels<STRATIFIED_SAMPLE_COUNT(), 1>(gbufferFiltered, output);
+        BoxBlurShadowMultipliers<2, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
         sprintf_s(fileName, baseFileName, "_prebox5");
         output.Save(fileName);
 
-        BoxBlurShadowMultipliers<3, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
-        ShadePixels<STRATIFIED_SAMPLE_COUNT(), 1>(gbufferFiltered, output);
+        BoxBlurShadowMultipliers<3, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
         sprintf_s(fileName, baseFileName, "_prebox7");
         output.Save(fileName);
 
-        BoxBlurShadowMultipliers<7, STRATIFIED_SAMPLE_COUNT()>(gbuffer, gbufferFiltered, output.m_width, output.m_height);
-        ShadePixels<STRATIFIED_SAMPLE_COUNT(), 1>(gbufferFiltered, output);
+        BoxBlurShadowMultipliers<7, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
         sprintf_s(fileName, baseFileName, "_prebox15");
         output.Save(fileName);
     }
 
     // make and save the unprocessed image
     {
-        ShadePixels<STRATIFIED_SAMPLE_COUNT(), STRATIFIED_SAMPLE_COUNT()>(gbuffer, output);
+        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbuffer, output);
         sprintf_s(fileName, baseFileName, "");
         output.Save(fileName);
     }
