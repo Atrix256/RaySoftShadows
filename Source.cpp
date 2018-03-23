@@ -194,6 +194,32 @@ T clamp(T value, T min, T max)
         return value;
 }
 
+/*
+//=================================================================================
+inline TVector3 CosineSampleHemisphere (const TVector3& normal)
+{
+    // from smallpt: http://www.kevinbeason.com/smallpt/
+
+    float r1 = 2.0f * c_pi *RandomFloat();
+    float r2 = RandomFloat();
+    float r2s = sqrt(r2);
+
+    TVector3 w = normal;
+    TVector3 u;
+    if (fabs(w[0]) > 0.1f)
+        u = Cross({ 0.0f, 1.0f, 0.0f }, w);
+    else
+        u = Cross({ 1.0f, 0.0f, 0.0f }, w);
+
+    u = Normalize(u);
+    TVector3 v = Cross(w, u);
+    TVector3 d = (u*cos(r1)*r2s + v*sin(r1)*r2s + w*sqrt(1 - r2));
+    d = Normalize(d);
+
+    return d;
+}
+*/
+
 //-------------------------------------------------------------------------------------------------------------------
 float3 RandomVectorTowardsLight (float3 lightDir, float lightSolidAngleRadius, float rngX, float rngY)
 {
@@ -368,7 +394,7 @@ struct SPositionalLight
 struct SDirectionalLight
 {
     float3 direction;
-    float solidAngleRadius;  
+    float  solidAngleRadius;    // the radius of the light disc if it was 1 unit away. This doesn't change over distance because it's an orthographic projection. TODO: make this so!
 
     float3 color;
 };
@@ -1201,6 +1227,8 @@ int main (int argc, char** argv)
 /*
 
 TODO:
+
+? does blue noise converge anymore? blue 256 quad doesn't look so great
 
 ! verify your quad code with what you made before
 * compare quad with disc. replace if appropriate
