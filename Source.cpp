@@ -195,6 +195,22 @@ T clamp(T value, T min, T max)
 }
 
 //-------------------------------------------------------------------------------------------------------------------
+float3 RandomVectorTowardsLight (float3 lightDir, float lightSolidAngleRadius, float rngX, float rngY)
+{
+    // make basis vectors for the light quad
+    float3 lightQuadUAxis = Cross(float3{ 0.0f, 1.0f, 0.0f }, lightDir);
+    float3 lightQuadVAxis = Cross(lightDir, lightQuadUAxis);
+
+    // make rng values from [0,1] to [-1,1]
+    rngX = rngX * 2.0f - 1.0f;
+    rngY = rngY * 2.0f - 1.0f;
+
+    float3 lightTarget = lightDir + lightQuadUAxis * rngX + lightQuadVAxis * rngY;
+
+    return Normalize(lightTarget);
+}
+
+//-------------------------------------------------------------------------------------------------------------------
 float3 RandomVectorInsideCone (float3 coneDir, float coneAngle, float rngX, float rngY)
 {
     // Translated from: https://stackoverflow.com/questions/38997302/create-random-unit-vector-inside-a-defined-conical-region
@@ -262,27 +278,27 @@ float3 RandomVectorInsideCone (float3 coneDir, float coneAngle, float rngX, floa
 }
 
 //-------------------------------------------------------------------------------------------------------------------
-template <size_t NUM_COMPONENTS>
+template <size_t NUM_CHANNELS>
 struct SImageData
 {
     SImageData (size_t width=0, size_t height=0)
         : m_width(width)
         , m_height(height)
     {
-        m_pixels.resize(m_width*m_height * NUM_COMPONENTS);
+        m_pixels.resize(m_width*m_height * NUM_CHANNELS);
     }
 
     bool Load (const char* fileName, bool isSRGB)
     {
-        int width, height, components;
-        unsigned char* pixels = stbi_load(fileName, &width, &height, &components, NUM_COMPONENTS);
+        int width, height, channels;
+        unsigned char* pixels = stbi_load(fileName, &width, &height, &channels, NUM_CHANNELS);
 
         if (!pixels)
             return false;
 
         m_width = width;
         m_height = height;
-        m_pixels.resize(m_width*m_height * NUM_COMPONENTS);
+        m_pixels.resize(m_width*m_height * NUM_CHANNELS);
 
         for (size_t i = 0; i < m_pixels.size(); ++i)
         {
@@ -314,21 +330,21 @@ struct SImageData
         }
 
         // save the image
-        return (stbi_write_png(fileName, (int)m_width, (int)m_height, NUM_COMPONENTS, &pixelsU8[0], (int)Pitch()) == 1);
+        return (stbi_write_png(fileName, (int)m_width, (int)m_height, NUM_CHANNELS, &pixelsU8[0], (int)Pitch()) == 1);
     }
 
-    size_t NumComponents () const { return NUM_COMPONENTS; }
+    size_t NumChannels () const { return NUM_CHANNELS; }
 
-    size_t Pitch () const { return m_width * NUM_COMPONENTS; }
+    size_t Pitch () const { return m_width * NUM_CHANNELS; }
 
     float* GetPixel(size_t x, size_t y)
     {
-        return &m_pixels[y*Pitch() + x* NUM_COMPONENTS];
+        return &m_pixels[y*Pitch() + x* NUM_CHANNELS];
     }
 
     const float* GetPixel(size_t x, size_t y) const
     {
-        return &m_pixels[y*Pitch() + x * NUM_COMPONENTS];
+        return &m_pixels[y*Pitch() + x * NUM_CHANNELS];
     }
 
     size_t m_width;
@@ -595,8 +611,8 @@ struct SGbufferPixel
 
 //-------------------------------------------------------------------------------------------------------------------
 
-template <int RADIUS, size_t COMPONENTS>
-void Convolve (const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest, std::array<float, (1 + RADIUS * 2) * (1 + RADIUS * 2)>& kernel)
+template <int RADIUS, size_t CHANNELS>
+void Convolve (const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest, std::array<float, (1 + RADIUS * 2) * (1 + RADIUS * 2)>& kernel)
 {
     static const size_t numPixelsOneSide = (1 + RADIUS * 2);
 
@@ -612,7 +628,7 @@ void Convolve (const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest, 
     {
         for (int x = 0; x < dest.m_width; ++x)
         {
-            for (size_t channel = 0; channel < COMPONENTS; ++channel)
+            for (size_t channel = 0; channel < CHANNELS; ++channel)
             {
                 *outPixel = 0.0f;
 
@@ -640,8 +656,8 @@ void Convolve (const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest, 
 
 //-------------------------------------------------------------------------------------------------------------------
 
-template <int RADIUS, size_t COMPONENTS>
-void BoxBlur(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest)
+template <int RADIUS, size_t CHANNELS>
+void BoxBlur(const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest)
 {
     static const size_t numPixelsInFilter = (1 + RADIUS * 2) * (1 + RADIUS * 2);
 
@@ -650,13 +666,13 @@ void BoxBlur(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest)
     for (float& f : kernel)
         f = 1.0f;
 
-    Convolve<RADIUS, COMPONENTS>(src, dest, kernel);
+    Convolve<RADIUS, CHANNELS>(src, dest, kernel);
 }
 
 //-------------------------------------------------------------------------------------------------------------------
 
-template <int RADIUS, size_t COMPONENTS>
-void TriangleBlur(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest)
+template <int RADIUS, size_t CHANNELS>
+void TriangleBlur(const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest)
 {
     static const size_t numPixelsOneSide = (1 + RADIUS * 2);
     static const size_t numPixelsInFilter = numPixelsOneSide * numPixelsOneSide;
@@ -674,13 +690,13 @@ void TriangleBlur(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& des
         kernel[i] = triangleX * triangleY;
     }
 
-    Convolve<RADIUS, COMPONENTS>(src, dest, kernel);
+    Convolve<RADIUS, CHANNELS>(src, dest, kernel);
 }
 
 //-------------------------------------------------------------------------------------------------------------------
 
-template <int RADIUS, size_t COMPONENTS>
-void MedianFilter(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& dest)
+template <int RADIUS, size_t CHANNELS>
+void MedianFilter(const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest)
 {
     const size_t numPixelsOneSide = (1 + RADIUS * 2);
     const size_t numPixelsInFilter = numPixelsOneSide * numPixelsOneSide;
@@ -694,7 +710,7 @@ void MedianFilter(const SImageData<COMPONENTS>& src, SImageData<COMPONENTS>& des
     {
         for (int x = 0; x < dest.m_width; ++x)
         {
-            for (size_t channel = 0; channel < COMPONENTS; ++channel)
+            for (size_t channel = 0; channel < CHANNELS; ++channel)
             {
                 for (int offsetY = -RADIUS; offsetY <= RADIUS; ++offsetY)
                 {
@@ -879,7 +895,8 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                 static_assert(RAY_PATTERN >= RayPattern::None && RAY_PATTERN <= RayPattern::Stratified,"RAY_PATTERN invalid");
             }
 
-            float3 randomDir = RandomVectorInsideCone(lightDir, g_directionalLights[lightIndex].solidAngleRadius, sampleX, sampleY);
+            //float3 randomDir = RandomVectorInsideCone(lightDir, g_directionalLights[lightIndex].solidAngleRadius, sampleX, sampleY);
+            float3 randomDir = RandomVectorTowardsLight(lightDir, g_directionalLights[lightIndex].solidAngleRadius, sampleX, sampleY);
 
             SHitInfo shadowHitInfo;
 
@@ -1167,17 +1184,15 @@ int main (int argc, char** argv)
 
 TODO:
 
-* 1 sample blue noise has a white dot in the shadow, need to look into it.
+! verify your quad code with what you made before
+* compare quad with disc. replace if appropriate
 
-! need to shoot at disc instead of doing the cone thing. get rid of cone thing.
+? does pcf make sense at all in this context?
 
 * do a blur where you blur NxN sections instead of each pixel reading every other pixel. This simulates something more quickly / easily done in a ray dispatch shader
+* try doing a blur where every 2x2 block is averaged. (a gbuffer blur! maybe depth aware)
 
 * make shading pixels a function, so easier to re-use
-
-* rename components to channels
-
-* try doing a blur where every 2x2 block is averaged. (a gbuffer blur! maybe depth aware)
 
 ? organize into multiple files?
 
@@ -1201,13 +1216,9 @@ TODO:
 
 * try fitting the shadow data to a function? piecewise least squares?
 
-* there are some weird white dots in the output images, check em out!
-
 * point light
 * directional light
 * IBL?
-
-* optimize RandomVectorInsideCone after you see it working
 
 ? combine directional and positional lights into one list?
 
@@ -1223,7 +1234,7 @@ TODO:
 * hard shadows
 * "path traced shadows"
 * compare vs path traced and make sure it converges with higher ray counts?
-* low variance early out
+* low variance early out?
 * try denoising?
 * i think maybe shooting rays at a disc is the right move, and that ray in cone is not correct.
 
