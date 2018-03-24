@@ -224,7 +224,7 @@ inline TVector3 CosineSampleHemisphere (const TVector3& normal)
 float3 RandomVectorTowardsLight (float3 lightDir, float lightSolidAngleRadius, float rngX, float rngY)
 {
     // TODO: should directional lights always store this value?
-    float radius = sinf(lightSolidAngleRadius);
+    float radius = tanf(lightSolidAngleRadius);
 
     // make basis vectors for the light quad
     lightDir = Normalize(lightDir);
