@@ -194,32 +194,6 @@ T clamp(T value, T min, T max)
         return value;
 }
 
-/*
-//=================================================================================
-inline TVector3 CosineSampleHemisphere (const TVector3& normal)
-{
-    // from smallpt: http://www.kevinbeason.com/smallpt/
-
-    float r1 = 2.0f * c_pi *RandomFloat();
-    float r2 = RandomFloat();
-    float r2s = sqrt(r2);
-
-    TVector3 w = normal;
-    TVector3 u;
-    if (fabs(w[0]) > 0.1f)
-        u = Cross({ 0.0f, 1.0f, 0.0f }, w);
-    else
-        u = Cross({ 1.0f, 0.0f, 0.0f }, w);
-
-    u = Normalize(u);
-    TVector3 v = Cross(w, u);
-    TVector3 d = (u*cos(r1)*r2s + v*sin(r1)*r2s + w*sqrt(1 - r2));
-    d = Normalize(d);
-
-    return d;
-}
-*/
-
 //-------------------------------------------------------------------------------------------------------------------
 float3 RandomVectorTowardsLight (float3 lightDir, float lightSolidAngleRadius, float rngX, float rngY)
 {
@@ -231,14 +205,11 @@ float3 RandomVectorTowardsLight (float3 lightDir, float lightSolidAngleRadius, f
     float3 scaledUAxis = Normalize(Cross(float3{ 0.0f, 1.0f, 0.0f }, lightDir)) * radius;
     float3 scaledVAxis = Normalize(Cross(lightDir, scaledUAxis)) * radius;
 
-    // make rng values from [0,1] to [-radius,radius]
-    rngX = (rngX * 2.0f - 1.0f);
-    rngY = (rngY * 2.0f - 1.0f);
+    float r1 = 2.0f * c_pi *rngX;
+    float r2 = rngY;
+    float r2s = sqrt(r2);
 
-    // return the ray
-    return Normalize(lightDir + scaledUAxis * rngX + scaledVAxis * rngY);
-
-    // TODO: this is a quad, should switch to disc
+    return Normalize(lightDir + scaledUAxis * cos(r1)*r2s + scaledVAxis * sin(r1)*r2s);
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -561,7 +532,7 @@ static const SSphere g_spheres[] =
 
 static const SDirectionalLight g_directionalLights[] =
 {
-    {{-0.3f, -1.0f, 0.0f}, 0.4f, {1.0f, 1.0f, 1.0f}},
+    {{-0.3f, -1.0f, 0.0f}, 0.1f, {1.0f, 1.0f, 1.0f}},
 };
 
 static const SPositionalLight g_positionalLights[] =
@@ -905,19 +876,8 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                 }
                 case RayPattern::Grid:
                 {
-                    if (SHADOW_RAY_COUNT_GRID_SIZE == 1)
-                    {
-                        sampleX = 0.5f;
-                        sampleY = 0.5f;
-                    }
-                    else
-                    {
-                        sampleX = float(sampleIndex % SHADOW_RAY_COUNT_GRID_SIZE) / float(SHADOW_RAY_COUNT_GRID_SIZE - 1);
-                        sampleY = float(sampleIndex / SHADOW_RAY_COUNT_GRID_SIZE) / float(SHADOW_RAY_COUNT_GRID_SIZE - 1);
-                    }
-
-                    // TODO: should we add a half cell for grid? i think so!
-
+                    sampleX = (float(sampleIndex % SHADOW_RAY_COUNT_GRID_SIZE) + 1.0f) / float(SHADOW_RAY_COUNT_GRID_SIZE + 1);
+                    sampleY = (float(sampleIndex / SHADOW_RAY_COUNT_GRID_SIZE) + 1.0f) / float(SHADOW_RAY_COUNT_GRID_SIZE + 1);
                     break;
                 }
                 case RayPattern::Stratified:
@@ -1196,7 +1156,6 @@ int main (int argc, char** argv)
         g_quads[i].CalculateNormal();
 
     // make images
-
     GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise>("White 1", "out/white_1%s.png", true, true);
     GeneratePixels<2, 3, RayPattern::None, RNGSource::WhiteNoise>("White 2", "out/white_2%s.png", true, false);
     GeneratePixels<4, 3, RayPattern::None, RNGSource::WhiteNoise>("White 4", "out/white_4%s.png", true, false);
@@ -1227,6 +1186,17 @@ int main (int argc, char** argv)
 /*
 
 TODO:
+
+* may need literal pathtraced version as ground truth.
+
+?! at work, do you add half a cell to grid? very important to make best use of the grid!
+
+* blue64 and blue 256 don't look any different
+
+* blue noise GR doesn't seem very high quality for some reason, seems like a bug?
+
+* maybe make a "ground truth" blue noise, which uses more pixels on the texture, or mitchel's or something.
+ * for N samples. shrug.
 
 ? does blue noise converge anymore? blue 256 quad doesn't look so great
 
