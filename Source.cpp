@@ -228,15 +228,15 @@ float3 RandomVectorTowardsLight (float3 lightDir, float lightSolidAngleRadius, f
 
     // make basis vectors for the light quad
     lightDir = Normalize(lightDir);
-    float3 lightQuadUAxis = Normalize(Cross(float3{ 0.0f, 1.0f, 0.0f }, lightDir));
-    float3 lightQuadVAxis = Normalize(Cross(lightDir, lightQuadUAxis));
+    float3 scaledUAxis = Normalize(Cross(float3{ 0.0f, 1.0f, 0.0f }, lightDir)) * radius;
+    float3 scaledVAxis = Normalize(Cross(lightDir, scaledUAxis)) * radius;
 
     // make rng values from [0,1] to [-radius,radius]
-    rngX = (rngX * 2.0f - 1.0f) * radius;
-    rngY = (rngY * 2.0f - 1.0f) * radius;
+    rngX = (rngX * 2.0f - 1.0f);
+    rngY = (rngY * 2.0f - 1.0f);
 
     // return the ray
-    return Normalize(lightDir + lightQuadUAxis * rngX + lightQuadVAxis * rngY);
+    return Normalize(lightDir + scaledUAxis * rngX + scaledVAxis * rngY);
 
     // TODO: this is a quad, should switch to disc
 }
