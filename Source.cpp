@@ -26,7 +26,12 @@
 
 #define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 2  // it does this many samples squared per pixel for AA
 
-#define FORCE_SINGLE_THREADED() 0  // useful for debugging
+#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING() 64 // it does this many samples squared per pixel while path tracing
+#define PATHTRACING_RAY_BOUNCE() 4
+
+#define FORCE_SINGLE_THREADED() 0 // useful for debugging
+
+
 
 typedef uint8_t uint8;
 
@@ -35,6 +40,7 @@ static const float c_pi = 3.14159265359f;
 static const float c_goldenRatioConjugate = 0.61803398875f;
 
 #define STRATIFIED_SAMPLE_COUNT() (STRATIFIED_SAMPLE_COUNT_ONE_AXIS()*STRATIFIED_SAMPLE_COUNT_ONE_AXIS())
+#define STRATIFIED_SAMPLE_COUNT_PATHTRACING() (STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING()*STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING())
 
 //-------------------------------------------------------------------------------------------------------------------
 float3 RandomVectorTowardsLight (float3 lightDir, float radius, float rngX, float rngY)
@@ -44,7 +50,9 @@ float3 RandomVectorTowardsLight (float3 lightDir, float radius, float rngX, floa
     float3 scaledUAxis = Normalize(Cross(float3{ 0.0f, 1.0f, 0.0f }, lightDir)) * radius;
     float3 scaledVAxis = Normalize(Cross(lightDir, scaledUAxis)) * radius;
 
-    // TODO: is it using radius correctly? it isn't diameter or something by accident right?
+    // TODO: is it using radius correctly? it isn't diameter or something by accident right? Compare to pathtraced version.
+
+    radius *= 0.0f;
 
     float r1 = 2.0f * c_pi *rngX;
     float r2 = rngY;
@@ -54,36 +62,54 @@ float3 RandomVectorTowardsLight (float3 lightDir, float radius, float rngX, floa
 }
 
 //-------------------------------------------------------------------------------------------------------------------
+inline float3 CosineSampleHemisphere (const float3& normal, float rngX, float rngY)
+{
+    // from smallpt: http://www.kevinbeason.com/smallpt/
+
+    float r1 = 2.0f * c_pi * rngX;
+    float r2 = rngY;
+    float r2s = sqrt(r2);
+
+    float3 w = normal;
+    float3 u;
+    if (fabs(w[0]) > 0.1f)
+        u = Cross({ 0.0f, 1.0f, 0.0f }, w);
+    else
+        u = Cross({ 1.0f, 0.0f, 0.0f }, w);
+
+    u = Normalize(u);
+    float3 v = Cross(w, u);
+    float3 d = (u*cos(r1)*r2s + v*sin(r1)*r2s + w*sqrt(1 - r2));
+    d = Normalize(d);
+
+    return d;
+}
+
+//-------------------------------------------------------------------------------------------------------------------
 static SQuad g_quads[] =
 {
-    { { -15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, -15.0f },{ -15.0f, 0.0f, -15.0f }, {1.0f, 1.0f, 1.0}},
+    { { -15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, -15.0f },{ -15.0f, 0.0f, -15.0f }, {0.2f, 0.2f, 0.2f}},
 };
 
 static const SSphere g_spheres[] =
 {
-    {{0.0f, 2.0f, 5.0f}, 1.0f, {1.0f, 0.1f, 0.1f}},
-    {{-2.0f, 2.3f, 7.0f}, 1.0f, {0.1f, 1.0f, 0.1f}},
+    { { -2.0f, 1.0f, 4.0f }, 1.0f,{ 1.0f, 0.1f, 0.1f } },
+    { {  0.0f, 1.0f, 4.0f }, 0.6f,{ 0.1f, 1.0f, 0.1f } },
+    { {  2.0f, 1.0f, 4.0f }, 0.3f,{ 0.1f, 0.1f, 1.0f } },
 };
 
 static const SPositionalLight g_positionalLights[] =
 {
-    { {-1.0f, 5.0f, 6.0f}, 0.2f,{ 1.0f, 1.0f, 1.0f }},
-#if 1
-    //{ { -4.0f, 5.0f, 5.0f },1.0f,{ 1.0f, 1.0f, 1.0f } },
-#else
-    {{-4.0f, 5.0f, 5.0f},1.0f,{20.0f, 10.0f, 10.0f}},
-    {{ 0.0f, 5.0f, 0.0f},1.0f,{10.0f, 20.0f, 10.0f}},
-    {{ 4.0f, 5.0f, 5.0f},1.0f,{10.0f, 10.0f, 20.0f}},
-#endif
+    { {-1.0f, 5.0f, 6.0f}, 0.5f,{ 10.0f, 10.0f, 10.0f }},
 };
 
 static const float  g_cameraDistance = 2.0f;
-static const float3 g_cameraPos = { 0.0f, 2.0f, 0.0f };
+static const float3 g_cameraPos = { 0.0f, 2.0f, -6.0f };
 static const float3 g_cameraX = { 1.0f, 0.0f, 0.0f };
 static const float3 g_cameraY = { 0.0f, 1.0f, 0.0f };
 static const float3 g_cameraZ = { 0.0f, 0.0f, 1.0f };
 
-static const float3 g_skyColor = { 135.0f / 255.0f, 206.0f / 255.0f, 235.0f / 255.0f };
+static const float3 g_skyColor = float3{ 135.0f / 255.0f, 206.0f / 255.0f, 235.0f / 255.0f } / 32.0f;
 
 SImageData<4> g_blueNoiseTexture;
 
@@ -98,7 +124,7 @@ void RunMultiThreaded (const char* label, const L& lambda)
     };
 
     size_t numThreads = FORCE_SINGLE_THREADED() ? 1 : std::thread::hardware_concurrency();
-    printf("Doing %s with %zu threads.\n", label, numThreads);
+    printf("%s (%zu threads)\n", label, numThreads);
     if (numThreads > 1)
     {
         std::vector<std::thread> threads;
@@ -434,27 +460,31 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
     }
 
     return ret;
-
 }
 
 float3 PixelFunctionShade (const SGbufferPixel& gbufferData)
 {
-    float3 ret = { 0.0f, 0.0f, 0.0f };
-
     if (gbufferData.hitInfo.collisionTime <= 0.0f)
         return g_skyColor;
 
     if (gbufferData.isLight)
-        return gbufferData.emissive;
+        return g_skyColor + gbufferData.emissive;
+
+    float3 ret = g_skyColor * gbufferData.hitInfo.albedo;
 
     for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
     {
         float3 lightDir = Normalize(g_positionalLights[lightIndex].position - gbufferData.worldPos);
+        float lightDistance = Length(g_positionalLights[lightIndex].position - gbufferData.worldPos);
+
+        float falloff = 1.0f / (lightDistance * lightDistance);
 
         float NdotL = Dot(lightDir, gbufferData.hitInfo.normal);
         if (NdotL > 0.0f)
-            ret = ret + g_positionalLights[lightIndex].color * gbufferData.hitInfo.albedo * NdotL * gbufferData.shadowMultipliersPositional[lightIndex];
+            ret = ret + g_positionalLights[lightIndex].color * gbufferData.hitInfo.albedo * NdotL * gbufferData.shadowMultipliersPositional[lightIndex] * falloff;
     }
+
+    // TODO: account for sky color too!
 
     return ret;
 }
@@ -647,6 +677,133 @@ void GeneratePixels(const char* task, const char* baseFileName, bool doPreProces
 
 //-------------------------------------------------------------------------------------------------------------------
 
+float3 PixelFunctionPathTrace(const float3& rayPos, const float3& rayDir, std::mt19937& rng, int depth = 0)
+{
+    // check for intersections with geometry
+    SHitInfo hitInfo;
+    for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]); ++i)
+        RayIntersect(rayPos, rayDir, g_spheres[i], hitInfo);
+    for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]); ++i)
+        RayIntersect(rayPos, rayDir, g_quads[i], hitInfo);
+
+    // TODO: make emissive part of the hitinfo structure like albedo is.
+
+    // check for intersections with spherical lights
+    float3 emissive = { 0.0f, 0.0f, 0.0f };
+    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+    {
+        SSphere lightSphere;
+        lightSphere.position = g_positionalLights[lightIndex].position;
+        lightSphere.radius = g_positionalLights[lightIndex].radius;
+        lightSphere.albedo = { 0.0f, 0.0f, 0.0f };
+
+        if (RayIntersect(rayPos, rayDir, lightSphere, hitInfo))
+        {
+            if (depth > 0)
+            {
+                int ijkl = 0;
+            }
+            emissive = g_positionalLights[lightIndex].color;
+        }
+    }
+
+    // if nothing hit, return the sky color
+    if (hitInfo.collisionTime < 0.0f)
+        return g_skyColor;
+
+    // recurse
+    float3 incomingLight = g_skyColor;
+    if (depth < PATHTRACING_RAY_BOUNCE())
+    {
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        float3 recursiveRayPos = (rayPos + rayDir * hitInfo.collisionTime) + hitInfo.normal * c_rayEpsilon;
+        float3 recursiveRayDir = CosineSampleHemisphere(hitInfo.normal, dist(rng), dist(rng));
+        incomingLight = PixelFunctionPathTrace(recursiveRayPos, recursiveRayDir, rng, depth+1);
+    }
+
+    // return shaded shaded surface color.
+    // No need to multiply by N dot L because we cosine sampled the hemisphere, aka it's importance sampled for the NdotL multiplication.
+    return emissive + incomingLight * hitInfo.albedo;
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
+void Pathtrace(const char* fileName)
+{
+    SImageData<3> output(IMAGE_WIDTH(), IMAGE_HEIGHT());
+    const size_t numPixels = output.m_width * output.m_height;
+
+    float aspectRatio = float(output.m_width) / float(output.m_height);
+
+    // Generate gbuffer data
+    RunMultiThreaded("Pathtrace",
+        [&] (std::atomic<size_t>& atomicRowIndex)
+        {
+            std::random_device rd;
+            std::mt19937 rng(rd());
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+            size_t rowIndex = atomicRowIndex.fetch_add(1);
+            bool reportProgress = (rowIndex == 0);
+            int oldPercent = -1;
+            while (rowIndex < output.m_height)
+            {
+                // do a row of work at a time
+                size_t pixelBase = rowIndex * output.m_width;
+                float3* outPixel = (float3*)output.GetPixel(0, rowIndex);
+                for (size_t pixelOffset = 0; pixelOffset < output.m_width; ++pixelOffset, ++outPixel)
+                {
+                    size_t pixelIndex = pixelBase + pixelOffset;
+
+                    // do multiple samples per pixel via stratified sampling and combine with a box filter
+                    float3 sampleSum = { 0.0f, 0.0f, 0.0f };
+                    for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT_PATHTRACING(); ++sampleIndex)
+                    {
+                        size_t sampleX = sampleIndex % STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING();
+                        size_t sampleY = sampleIndex / STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING();
+
+                        float stratU = (float(sampleX)+dist(rng)) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING());
+                        float stratV = (float(sampleY)+dist(rng)) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING());
+
+                        // calculate uv coordinate of pixel in [-1,1], also correcting for aspect ratio and flipping the vertical axis
+                        float u = (((float(pixelIndex % output.m_width)+stratU) / float(output.m_width)) * 2.0f - 1.0f) * aspectRatio;
+                        float v = (((float(pixelIndex / output.m_width)+stratV) / float(output.m_height)) * 2.0f - 1.0f) * -1.0f;
+
+                        float3 rayPos = g_cameraPos;
+                        float3 rayDir = Normalize(g_cameraX * u + g_cameraY * v + g_cameraZ * g_cameraDistance);
+
+                        float3 sample = PixelFunctionPathTrace(rayPos, rayDir, rng);
+                        *outPixel = Lerp(*outPixel, sample, 1.0f / float(sampleIndex+1));
+                    }
+
+                    // TODO: the stratified uv was not working well. it might not be working well in the sampled version either...
+
+                    // report progress
+                    if (reportProgress)
+                    {
+                        int newPercent = (int)(100.0f * float(pixelIndex) / float(numPixels));
+                        if (oldPercent != newPercent)
+                        {
+                            printf("\r%i%%", newPercent);
+                            oldPercent = newPercent;
+                        }
+                    }
+                }
+
+                rowIndex = atomicRowIndex.fetch_add(1);
+            }
+
+            if (reportProgress)
+                printf("\r100%%\n");
+        }
+    );
+
+    // save the image
+    output.Save(fileName);
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
 int main (int argc, char** argv)
 {
     // make a 4 channel blue noise tetxure
@@ -677,7 +834,15 @@ int main (int argc, char** argv)
     for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]); ++i)
         g_quads[i].CalculateNormal();
 
-    // make images
+    // path traced version
+    Pathtrace("out/Pathtrace.png");
+
+    // TODO: temp!
+    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard_1%s.png", false, false);
+    GeneratePixels<256, 3, RayPattern::None, RNGSource::WhiteNoise>("White 256", "out/white_256%s.png", false, false);
+    return 0;
+
+    // make sampled images
     GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise>("White 1", "out/white_1%s.png", true, true);
     GeneratePixels<2, 3, RayPattern::None, RNGSource::WhiteNoise>("White 2", "out/white_2%s.png", true, false);
     GeneratePixels<4, 3, RayPattern::None, RNGSource::WhiteNoise>("White 4", "out/white_4%s.png", true, false);
@@ -708,6 +873,17 @@ int main (int argc, char** argv)
 /*
 
 TODO:
+
+? what is the real falloff formula for spherical light sources?
+ * for one, it isn't from center of light source, but is from surface, so the falloff is from where the ray intersects with the light. can we get that info? if not, just subtract out radius for a better approximation.
+ * secondly, i don't think it's exactly 1/(d*d). find out what it really is
+
+* path tracing light looks rough. You might not be stratified sampling correctly... like you migh tbe doing [-1,1] or [-0.5,0.5] or something
+* "hard 1" doesn't look right. there are 2 shadows and they aren't facing the right way?!
+
+* blurring does weird things to the light now. maybe related to clamping... try clamping linear to sRGB and the reverse to see if it clears it up
+
+* for path tracing, should you directly sample light maybe?
 
 "hard 1" shadows seem very off... probably indicative of something else being very wrong.
 

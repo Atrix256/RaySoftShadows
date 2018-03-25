@@ -144,7 +144,8 @@ inline float3x3 MultiplyVectorByTranspose(const float3& a)
     return ret;
 }
 
-inline float Lerp (float a, float b, float t)
+template <typename T>
+inline T Lerp (const T& a, const T& b, float t)
 {
     return a * (1.0f - t) + b * t;
 }
