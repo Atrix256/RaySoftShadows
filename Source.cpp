@@ -37,15 +37,14 @@ static const float c_goldenRatioConjugate = 0.61803398875f;
 #define STRATIFIED_SAMPLE_COUNT() (STRATIFIED_SAMPLE_COUNT_ONE_AXIS()*STRATIFIED_SAMPLE_COUNT_ONE_AXIS())
 
 //-------------------------------------------------------------------------------------------------------------------
-float3 RandomVectorTowardsLight (float3 lightDir, float lightSolidAngleRadius, float rngX, float rngY)
+float3 RandomVectorTowardsLight (float3 lightDir, float radius, float rngX, float rngY)
 {
-    // TODO: should directional lights always store this value?
-    float radius = tanf(lightSolidAngleRadius);
-
     // make basis vectors for the light quad
     lightDir = Normalize(lightDir);
     float3 scaledUAxis = Normalize(Cross(float3{ 0.0f, 1.0f, 0.0f }, lightDir)) * radius;
     float3 scaledVAxis = Normalize(Cross(lightDir, scaledUAxis)) * radius;
+
+    // TODO: is it using radius correctly? it isn't diameter or something by accident right?
 
     float r1 = 2.0f * c_pi *rngX;
     float r2 = rngY;
@@ -53,90 +52,6 @@ float3 RandomVectorTowardsLight (float3 lightDir, float lightSolidAngleRadius, f
 
     return Normalize(lightDir + scaledUAxis * cos(r1)*r2s + scaledVAxis * sin(r1)*r2s);
 }
-
-//-------------------------------------------------------------------------------------------------------------------
-float3 RandomVectorInsideCone (float3 coneDir, float coneAngle, float rngX, float rngY)
-{
-    // Translated from: https://stackoverflow.com/questions/38997302/create-random-unit-vector-inside-a-defined-conical-region
-
-
-    // Generate points on the spherical cap around the north pole [1].
-    // [1] See https://math.stackexchange.com/a/205589/81266
-
-    float z = rngX * (1.0f - std::cosf(coneAngle)) + std::cosf(coneAngle);
-    float phi = rngY * 2.0f * c_pi;
-    float x = std::sqrtf(1.0f - z * z) * std::cosf(phi);
-    float y = std::sqrtf(1.0f - z * z) * std::sinf(phi);
-
-    // Find the rotation axis `u` and rotation angle `rot`[1]
-    float3 u = Normalize(Cross({ 0.0f, 0.0f, 1.0f }, Normalize(coneDir)));
-    float rot = std::acosf(Dot(Normalize(coneDir), { 0.0f, 0.0f, 1.0f }));
-
-    // Convert rotation axis and angle to 3x3 rotation matrix [2]
-    // [2] See https://en.wikipedia.org/wiki/Rotation_matrix#Rotation_matrix_from_axis_and_angle
-    float3x3 crossMatrix;
-    crossMatrix[0] = { 0.0f, -u[2], u[1] };
-    crossMatrix[1] = { u[2], 0.0f, -u[0] };
-    crossMatrix[2] = { -u[1], u[0], 0.0f };
-
-    float3x3 identity;
-    identity[0] = { 1.0f, 0.0f, 0.0f };
-    identity[1] = { 0.0f, 1.0f, 0.0f };
-    identity[2] = { 0.0f, 0.0f, 1.0f };
-
-    float3x3 R = identity * std::cosf(rot) + crossMatrix * std::sinf(rot) + MultiplyVectorByTranspose(u) * (1.0f - std::cosf(rot));
-
-    // Rotate[x; y; z] from north pole to `coneDir`.
-    float3 r = { x, y, z };
-    return R * r;
-
-
-    /*
-    coneAngle = coneAngleDegree * pi/180;
-
-    % Generate points on the spherical cap around the north pole [1].
-    % [1] See https://math.stackexchange.com/a/205589/81266
-    z = RNG.rand(1, N) * (1 - cos(coneAngle)) + cos(coneAngle);
-    phi = RNG.rand(1, N) * 2 * pi;
-    x = sqrt(1-z.^2).*cos(phi);
-    y = sqrt(1-z.^2).*sin(phi);
-
-    % If the spherical cap is centered around the north pole, we're done.
-    if all(coneDir(:) == [0;0;1])
-    r = [x; y; z];
-    return;
-    end
-
-    % Find the rotation axis `u` and rotation angle `rot` [1]
-    u = normc(cross([0;0;1], normc(coneDir)));
-    rot = acos(dot(normc(coneDir), [0;0;1]));
-
-    % Convert rotation axis and angle to 3x3 rotation matrix [2]
-    % [2] See https://en.wikipedia.org/wiki/Rotation_matrix#Rotation_matrix_from_axis_and_angle
-    crossMatrix = @(x,y,z) [0 -z y; z 0 -x; -y x 0];
-    R = cos(rot) * eye(3) + sin(rot) * crossMatrix(u(1), u(2), u(3)) + (1-cos(rot))*(u * u');
-
-    % Rotate [x; y; z] from north pole to `coneDir`.
-    r = R * [x; y; z];
-    */
-}
-
-struct SPositionalLight
-{
-    float3 position;
-    float radius;
-
-    float3 color;
-};
-
-struct SDirectionalLight
-{
-    float3 direction;
-    float  solidAngleRadius;    // the radius of the light disc if it was 1 unit away. This doesn't change over distance because it's an orthographic projection. TODO: make this so!
-
-    float3 color;
-};
-
 
 //-------------------------------------------------------------------------------------------------------------------
 static SQuad g_quads[] =
@@ -148,18 +63,13 @@ static const SSphere g_spheres[] =
 {
     {{0.0f, 2.0f, 5.0f}, 1.0f, {1.0f, 0.1f, 0.1f}},
     {{-2.0f, 2.3f, 7.0f}, 1.0f, {0.1f, 1.0f, 0.1f}},
-    {{3.0f, 1.8f, 8.0f}, 1.0f, {0.1f, 0.1f, 1.0f}},
-};
-
-static const SDirectionalLight g_directionalLights[] =
-{
-    {{-0.3f, -1.0f, 0.0f}, 0.1f, {1.0f, 1.0f, 1.0f}},
 };
 
 static const SPositionalLight g_positionalLights[] =
 {
+    { {-1.0f, 5.0f, 6.0f}, 0.2f,{ 1.0f, 1.0f, 1.0f }},
 #if 1
-    { { -4.0f, 5.0f, 5.0f },1.0f,{ 0.0f, 0.0f, 0.0f } },
+    //{ { -4.0f, 5.0f, 5.0f },1.0f,{ 1.0f, 1.0f, 1.0f } },
 #else
     {{-4.0f, 5.0f, 5.0f},1.0f,{20.0f, 10.0f, 10.0f}},
     {{ 0.0f, 5.0f, 0.0f},1.0f,{10.0f, 20.0f, 10.0f}},
@@ -211,8 +121,10 @@ struct SGbufferPixel
 {
     SHitInfo hitInfo;
     float u, v;
-    float shadowMultipliersDirectional[sizeof(g_directionalLights) / sizeof(g_directionalLights[0])];
     float shadowMultipliersPositional[sizeof(g_positionalLights) / sizeof(g_positionalLights[0])];
+    bool isLight = false;
+    float3 emissive;
+    float3 worldPos;
 };
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -358,9 +270,6 @@ void BoxBlurShadowMultipliers (const std::vector<SGbufferPixel>& src, std::vecto
         {
             for (size_t sampleIndex = 0; sampleIndex < SAMPLES_PER_PIXEL; ++sampleIndex)
             {
-                for (float& f : outPixel->shadowMultipliersDirectional)
-                    f = 0.0f;
-
                 for (float& f : outPixel->shadowMultipliersPositional)
                     f = 0.0f;
 
@@ -375,17 +284,11 @@ void BoxBlurShadowMultipliers (const std::vector<SGbufferPixel>& src, std::vecto
                         sampleX = clamp(sampleX, 0, (int)width - 1);
 
                         const SGbufferPixel& inPixel = src[(sampleY * width + sampleX) * SAMPLES_PER_PIXEL + sampleIndex];
-                        
-                        for (size_t index = 0; index < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++index)
-                            outPixel->shadowMultipliersDirectional[index] += inPixel.shadowMultipliersDirectional[index];
 
                         for (size_t index = 0; index < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++index)
                             outPixel->shadowMultipliersPositional[index] += inPixel.shadowMultipliersPositional[index];
                     }
                 }
-
-                for (float& f : outPixel->shadowMultipliersDirectional)
-                    f /= float(numPixelsInFilter);
 
                 for (float& f : outPixel->shadowMultipliersPositional)
                     f /= float(numPixelsInFilter);
@@ -428,14 +331,33 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
     for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]); ++i)
         RayIntersect(rayPos, rayDir, g_quads[i], ret.hitInfo);
 
-    // apply directional lighting
+    // see if a positional light was hit, and if so, don't do any shadow rays
+    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+    {
+        SSphere lightSphere;
+        lightSphere.position = g_positionalLights[lightIndex].position;
+        lightSphere.radius = g_positionalLights[lightIndex].radius;
+
+        if (RayIntersect(rayPos, rayDir, lightSphere, ret.hitInfo))
+        {
+            ret.isLight = true;
+            ret.emissive = g_positionalLights[lightIndex].color;
+        }
+    }
+    if (ret.isLight)
+        return ret;
+
+    ret.worldPos = rayPos + rayDir * ret.hitInfo.collisionTime;
+
+    // shadow rays
     float3 pixelPos = rayPos + rayDir * ret.hitInfo.collisionTime;
     float3 shadowPos = pixelPos + ret.hitInfo.normal * c_rayEpsilon;
-    for (size_t lightIndex = 0; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
+    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
     {
-        float3 lightDir = Normalize(g_directionalLights[lightIndex].direction * -1.0f);
+        float3 lightDir = Normalize(g_positionalLights[lightIndex].position - ret.worldPos);
+        float lightDistance = Length(g_positionalLights[lightIndex].position - ret.worldPos);
 
-        ret.shadowMultipliersDirectional[lightIndex] = 1.0f;
+        ret.shadowMultipliersPositional[lightIndex] = 1.0f;
 
         for (size_t sampleIndex = 0; sampleIndex <= SHADOW_RAY_COUNT; ++sampleIndex)
         {
@@ -493,10 +415,10 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                 static_assert(RAY_PATTERN >= RayPattern::None && RAY_PATTERN <= RayPattern::Stratified,"RAY_PATTERN invalid");
             }
 
-            //float3 randomDir = RandomVectorInsideCone(lightDir, g_directionalLights[lightIndex].solidAngleRadius, sampleX, sampleY);
-            float3 randomDir = RandomVectorTowardsLight(lightDir, g_directionalLights[lightIndex].solidAngleRadius, sampleX, sampleY);
+            float3 randomDir = RandomVectorTowardsLight(lightDir, g_positionalLights[lightIndex].radius, sampleX, sampleY);
 
             SHitInfo shadowHitInfo;
+            shadowHitInfo.collisionTime = lightDistance;
 
             bool intersectionFound = false;
             for (size_t i = 0; i < sizeof(g_spheres) / sizeof(g_spheres[0]) && !intersectionFound; ++i)
@@ -505,13 +427,11 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                 intersectionFound |= RayIntersect(shadowPos, randomDir, g_quads[i], shadowHitInfo);
 
             if (intersectionFound)
-                ret.shadowMultipliersDirectional[lightIndex] = Lerp(ret.shadowMultipliersDirectional[lightIndex], 0.0f, 1.0f / float(1+sampleIndex));
+                ret.shadowMultipliersPositional[lightIndex] = Lerp(ret.shadowMultipliersPositional[lightIndex], 0.0f, 1.0f / float(1+sampleIndex));
             else
-                ret.shadowMultipliersDirectional[lightIndex] = Lerp(ret.shadowMultipliersDirectional[lightIndex], 1.0f, 1.0f / float(1+sampleIndex));
+                ret.shadowMultipliersPositional[lightIndex] = Lerp(ret.shadowMultipliersPositional[lightIndex], 1.0f, 1.0f / float(1+sampleIndex));
         }
     }
-
-    // TODO: positional lights. Maybe make a common function or something
 
     return ret;
 
@@ -524,16 +444,17 @@ float3 PixelFunctionShade (const SGbufferPixel& gbufferData)
     if (gbufferData.hitInfo.collisionTime <= 0.0f)
         return g_skyColor;
 
-    for (size_t lightIndex = 0; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
+    if (gbufferData.isLight)
+        return gbufferData.emissive;
+
+    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
     {
-        float3 lightDir = Normalize(g_directionalLights[lightIndex].direction * -1.0f);
+        float3 lightDir = Normalize(g_positionalLights[lightIndex].position - gbufferData.worldPos);
 
         float NdotL = Dot(lightDir, gbufferData.hitInfo.normal);
         if (NdotL > 0.0f)
-            ret = ret + g_directionalLights[lightIndex].color * gbufferData.hitInfo.albedo * NdotL * gbufferData.shadowMultipliersDirectional[lightIndex];
+            ret = ret + g_positionalLights[lightIndex].color * gbufferData.hitInfo.albedo * NdotL * gbufferData.shadowMultipliersPositional[lightIndex];
     }
-
-    // TODO: positional lights too!
 
     return ret;
 }
@@ -647,9 +568,6 @@ void GeneratePixels(const char* task, const char* baseFileName, bool doPreProces
         std::vector<SGbufferPixel> gbuffer1ShadowSample = gbuffer;
         for (SGbufferPixel& pixel : gbuffer1ShadowSample)
         {
-            for (size_t lightIndex = 1; lightIndex < sizeof(g_directionalLights) / sizeof(g_directionalLights[0]); ++lightIndex)
-                pixel.shadowMultipliersDirectional[lightIndex] = pixel.shadowMultipliersDirectional[0];
-
             for (size_t lightIndex = 1; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
                 pixel.shadowMultipliersPositional[lightIndex] = pixel.shadowMultipliersPositional[0];
         }
@@ -791,11 +709,20 @@ int main (int argc, char** argv)
 
 TODO:
 
+"hard 1" shadows seem very off... probably indicative of something else being very wrong.
+
+* squared falloff for positional lights
+
+? should we add the sky color (ambient) to all lighting, even in the shadows?
+
 * make spherical point lights
+ * and make them render the point lights.
+ * emissivive, no lighting of course
 
 * directional lights a special case of spherical point lights
 
 * may need literal pathtraced version as ground truth.
+ * just primary rays, no bounces.
 
 ?! at work, do you add half a cell to grid? very important to make best use of the grid!
 

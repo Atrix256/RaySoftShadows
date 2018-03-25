@@ -31,6 +31,13 @@ struct SHitInfo
     float3 albedo = { 0.0f, 0.0f, 0.0f };
 };
 
+struct SPositionalLight
+{
+    float3 position;
+    float radius;
+    float3 color;
+};
+
 //-------------------------------------------------------------------------------------------------------------------
 inline bool RayIntersect (const float3& rayPos, const float3& rayDir, const SQuad& quad, SHitInfo& hitInfo)
 {
