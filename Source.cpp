@@ -7,12 +7,9 @@
 #include <random>
 #include <algorithm>
 
-#define IMAGE_WIDTH() 400
-#define IMAGE_HEIGHT() 400
-
-#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 2  // it does this many samples squared per pixel for AA
-
-#define FORCE_SINGLE_THREADED() 0  // useful for debugging
+#include "VectorMath.h"
+#include "SImageData.h"
+#include "RayIntersect.h"
 
 // stb_image is an amazing header only image library (aka no linking, just include the headers!).  http://nothings.org/stb
 #pragma warning( disable : 4996 ) 
@@ -22,177 +19,22 @@
 #include "stb_image.h"
 #pragma warning( default : 4996 ) 
 
-typedef uint8_t uint8;
-typedef std::array<float, 3> float3;
-typedef std::array<std::array<float, 3>, 3> float3x3;
 
-float LinearTosRGB(float value);
-float sRGBToLinear(float value);
+
+#define IMAGE_WIDTH() 400
+#define IMAGE_HEIGHT() 400
+
+#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 2  // it does this many samples squared per pixel for AA
+
+#define FORCE_SINGLE_THREADED() 0  // useful for debugging
+
+typedef uint8_t uint8;
 
 static const float c_rayEpsilon = 0.01f; // value used to push the ray a little bit away from surfaces before doing shadow rays
 static const float c_pi = 3.14159265359f;
 static const float c_goldenRatioConjugate = 0.61803398875f;
 
 #define STRATIFIED_SAMPLE_COUNT() (STRATIFIED_SAMPLE_COUNT_ONE_AXIS()*STRATIFIED_SAMPLE_COUNT_ONE_AXIS())
-
-//-------------------------------------------------------------------------------------------------------------------
-
-float3 operator* (const float3& a, const float3& b)
-{
-    float3 ret;
-    ret[0] = a[0] * b[0];
-    ret[1] = a[1] * b[1];
-    ret[2] = a[2] * b[2];
-    return ret;
-}
-
-float3 operator+ (const float3& a, const float3& b)
-{
-    float3 ret;
-    ret[0] = a[0] + b[0];
-    ret[1] = a[1] + b[1];
-    ret[2] = a[2] + b[2];
-    return ret;
-}
-
-float3 operator- (const float3& a, const float3& b)
-{
-    float3 ret;
-    ret[0] = a[0] - b[0];
-    ret[1] = a[1] - b[1];
-    ret[2] = a[2] - b[2];
-    return ret;
-}
-
-float3 operator* (const float3& a, float b)
-{
-    float3 ret;
-    ret[0] = a[0] * b;
-    ret[1] = a[1] * b;
-    ret[2] = a[2] * b;
-    return ret;
-}
-
-float3 operator+ (const float3& a, float b)
-{
-    float3 ret;
-    ret[0] = a[0] + b;
-    ret[1] = a[1] + b;
-    ret[2] = a[2] + b;
-    return ret;
-}
-
-float3 operator/ (const float3& a, float b)
-{
-    return a * (1.0f / b);
-}
-
-float3x3 operator* (const float3x3& a, float b)
-{
-    float3x3 ret;
-    for (size_t y = 0; y < 3; ++y)
-    {
-        for (size_t x = 0; x < 3; ++x)
-        {
-            ret[y][x] = a[y][x] * b;
-        }
-    }
-    return ret;
-}
-
-float3 operator* (const float3x3& a, const float3& b)
-{
-    float3 ret = { 0.0f, 0.0f, 0.0f };
-    for (size_t y = 0; y < 3; ++y)
-    {
-        for (size_t x = 0; x < 3; ++x)
-        {
-            ret[y] = a[y][x] *  b[x];
-        }
-    }
-    return ret;
-}
-
-float3x3 operator+ (const float3x3& a, const float3x3& b)
-{
-    float3x3 ret;
-    for (size_t y = 0; y < 3; ++y)
-    {
-        for (size_t x = 0; x < 3; ++x)
-        {
-            ret[y][x] = a[y][x] + b[y][x];
-        }
-    }
-    return ret;
-}
-
-float Length(const float3& a)
-{
-    return std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
-}
-
-float3 Normalize(const float3& a)
-{
-    return a / Length(a);
-}
-
-float Dot(const float3& a, const float3& b)
-{
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-inline float3 Cross (const float3& a, const float3& b)
-{
-    return
-    {
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0]
-    };
-}
-
-inline float ScalarTriple(const float3& a, const float3& b, const float3& c)
-{
-    return Dot(Cross(a, b), c);
-}
-
-inline float3x3 Transpose(const float3x3& a)
-{
-    float3x3 ret;
-    ret[0] = { a[0][0], a[1][0], a[2][0] };
-    ret[1] = { a[0][1], a[1][1], a[2][1] };
-    ret[2] = { a[0][2], a[1][2], a[2][2] };
-    return ret;
-}
-
-inline float3x3 MultiplyVectorByTranspose(const float3& a)
-{
-    float3x3 ret;
-    for (size_t y = 0; y < 3; ++y)
-    {
-        for (size_t x = 0; x < 3; ++x)
-        {
-            ret[y][x] = a[y] * a[x];
-        }
-    }
-    return ret;
-}
-
-inline float Lerp (float a, float b, float t)
-{
-    return a * (1.0f - t) + b * t;
-}
-
-template <typename T>
-T clamp(T value, T min, T max)
-{
-    if (value <= min)
-        return min;
-    else if (value >= max)
-        return max;
-    else
-        return value;
-}
 
 //-------------------------------------------------------------------------------------------------------------------
 float3 RandomVectorTowardsLight (float3 lightDir, float lightSolidAngleRadius, float rngX, float rngY)
@@ -279,81 +121,6 @@ float3 RandomVectorInsideCone (float3 coneDir, float coneAngle, float rngX, floa
     */
 }
 
-//-------------------------------------------------------------------------------------------------------------------
-template <size_t NUM_CHANNELS>
-struct SImageData
-{
-    SImageData (size_t width=0, size_t height=0)
-        : m_width(width)
-        , m_height(height)
-    {
-        m_pixels.resize(m_width*m_height * NUM_CHANNELS);
-    }
-
-    bool Load (const char* fileName, bool isSRGB)
-    {
-        int width, height, channels;
-        unsigned char* pixels = stbi_load(fileName, &width, &height, &channels, NUM_CHANNELS);
-
-        if (!pixels)
-            return false;
-
-        m_width = width;
-        m_height = height;
-        m_pixels.resize(m_width*m_height * NUM_CHANNELS);
-
-        for (size_t i = 0; i < m_pixels.size(); ++i)
-        {
-            m_pixels[i] = float(pixels[i]) / 255.0f;
-            if (isSRGB)
-                m_pixels[i] = sRGBToLinear(m_pixels[i]);
-        }
-
-        stbi_image_free(pixels);
-
-        return true;
-    }
-
-    bool Save (const char* fileName, bool toSRGB = true)
-    {
-        // convert from linear f32 to sRGB u8
-        std::vector<uint8> pixelsU8;
-        pixelsU8.resize(m_pixels.size());
-        for (size_t i = 0; i < m_pixels.size(); ++i)
-        {
-            if (toSRGB)
-            {
-                pixelsU8[i] = uint8(LinearTosRGB(m_pixels[i])*255.0f);
-            }
-            else
-            {
-                pixelsU8[i] = uint8(m_pixels[i]*255.0f);
-            }
-        }
-
-        // save the image
-        return (stbi_write_png(fileName, (int)m_width, (int)m_height, NUM_CHANNELS, &pixelsU8[0], (int)Pitch()) == 1);
-    }
-
-    size_t NumChannels () const { return NUM_CHANNELS; }
-
-    size_t Pitch () const { return m_width * NUM_CHANNELS; }
-
-    float* GetPixel(size_t x, size_t y)
-    {
-        return &m_pixels[y*Pitch() + x* NUM_CHANNELS];
-    }
-
-    const float* GetPixel(size_t x, size_t y) const
-    {
-        return &m_pixels[y*Pitch() + x * NUM_CHANNELS];
-    }
-
-    size_t m_width;
-    size_t m_height;
-    std::vector<float> m_pixels;
-};
-
 struct SPositionalLight
 {
     float3 position;
@@ -370,152 +137,6 @@ struct SDirectionalLight
     float3 color;
 };
 
-struct SSphere
-{
-    float3 position;
-    float radius;
-
-    float3 albedo;
-};
-
-struct SQuad
-{
-    void CalculateNormal ()
-    {
-        float3 e1 = b - a;
-        float3 e2 = c - a;
-        normal = Normalize(Cross(e1, e2));
-    }
-
-    float3  a, b, c, d;
-    float3  albedo;
-
-    // calculated!
-    float3  normal;
-};
-
-struct SHitInfo
-{
-    float collisionTime = -1.0f;
-    float3 normal;
-    float3 albedo = { 0.0f, 0.0f, 0.0f };
-};
-
-//-------------------------------------------------------------------------------------------------------------------
-inline bool RayIntersect (const float3& rayPos, const float3& rayDir, const SQuad& quad, SHitInfo& hitInfo)
-{
-    // This function adapted from "Real Time Collision Detection" 5.3.5 Intersecting Line Against Quadrilateral
-    // IntersectLineQuad()
-    float3 pa = quad.a - rayPos;
-    float3 pb = quad.b - rayPos;
-    float3 pc = quad.c - rayPos;
-    // Determine which triangle to test against by testing against diagonal first
-    float3 m = Cross(pc, rayDir);
-    float3 r;
-    float v = Dot(pa, m); // ScalarTriple(pq, pa, pc);
-    if (v >= 0.0f) {
-        // Test intersection against triangle abc
-        float u = -Dot(pb, m); // ScalarTriple(pq, pc, pb);
-        if (u < 0.0f) return false;
-        float w = ScalarTriple(rayDir, pb, pa);
-        if (w < 0.0f) return false;
-        // Compute r, r = u*a + v*b + w*c, from barycentric coordinates (u, v, w)
-        float denom = 1.0f / (u + v + w);
-        u *= denom;
-        v *= denom;
-        w *= denom; // w = 1.0f - u - v;
-        r = quad.a*u + quad.b*v + quad.c*w;
-    }
-    else {
-        // Test intersection against triangle dac
-        float3 pd = quad.d - rayPos;
-        float u = Dot(pd, m); // ScalarTriple(pq, pd, pc);
-        if (u < 0.0f) return false;
-        float w = ScalarTriple(rayDir, pa, pd);
-        if (w < 0.0f) return false;
-        v = -v;
-        // Compute r, r = u*a + v*d + w*c, from barycentric coordinates (u, v, w)
-        float denom = 1.0f / (u + v + w);
-        u *= denom;
-        v *= denom;
-        w *= denom; // w = 1.0f - u - v;
-        r = quad.a*u + quad.d*v + quad.c*w;
-    }
-
-    // make sure normal is facing opposite of ray direction.
-    // this is for if we are hitting the object from the inside / back side.
-    float3 normal = quad.normal;
-    if (Dot(quad.normal, rayDir) > 0.0f)
-        normal = normal * -1.0f;
-
-    // figure out the time t that we hit the plane (quad)
-    float t;
-    if (abs(rayDir[0]) > 0.0f)
-        t = (r[0] - rayPos[0]) / rayDir[0];
-    else if (abs(rayDir[1]) > 0.0f)
-        t = (r[1] - rayPos[1]) / rayDir[1];
-    else if (abs(rayDir[2]) > 0.0f)
-        t = (r[2] - rayPos[2]) / rayDir[2];
-
-    // only positive time hits allowed!
-    if (t < 0.0f)
-        return false;
-
-    //enforce a max distance if we should
-    if (hitInfo.collisionTime >= 0.0 && t > hitInfo.collisionTime)
-        return false;
-
-    hitInfo.collisionTime = t;
-    hitInfo.albedo = quad.albedo;
-    hitInfo.normal = normal;
-    return true;
-}
-
-//-------------------------------------------------------------------------------------------------------------------
-inline bool RayIntersect (const float3& rayPos, const float3& rayDir, const SSphere& sphere, SHitInfo& hitInfo)
-{
-    //get the vector from the center of this circle to where the ray begins.
-    float3 m = rayPos - sphere.position;
-
-    //get the dot product of the above vector and the ray's vector
-    float b = Dot(m, rayDir);
-
-    float c = Dot(m, m) - sphere.radius * sphere.radius;
-
-    //exit if r's origin outside s (c > 0) and r pointing away from s (b > 0)
-    if (c > 0.0 && b > 0.0)
-        return false;
-
-    //calculate discriminant
-    float discr = b * b - c;
-
-    //a negative discriminant corresponds to ray missing sphere
-    if (discr <= 0.0)
-        return false;
-
-    //ray now found to intersect sphere, compute smallest t value of intersection
-    float collisionTime = -b - sqrt(discr);
-
-    //if t is negative, ray started inside sphere so clamp t to zero and remember that we hit from the inside
-    if (collisionTime < 0.0)
-        collisionTime = -b + sqrt(discr);
-
-    //enforce a max distance if we should
-    if (hitInfo.collisionTime >= 0.0 && collisionTime > hitInfo.collisionTime)
-        return false;
-
-    float3 normal = Normalize((rayPos + rayDir * collisionTime) - sphere.position);
-
-    // make sure normal is facing opposite of ray direction.
-    // this is for if we are hitting the object from the inside / back side.
-    if (Dot(normal, rayDir) > 0.0f)
-        normal = normal * -1.0f;
-
-    hitInfo.collisionTime = collisionTime;
-    hitInfo.normal = normal;
-    hitInfo.albedo = sphere.albedo;
-    return true;
-}
 
 //-------------------------------------------------------------------------------------------------------------------
 static SQuad g_quads[] =
@@ -582,23 +203,6 @@ void RunMultiThreaded (const char* label, const L& lambda)
     {
         wrapper();
     }
-}
-
-//-------------------------------------------------------------------------------------------------------------------
-float sRGBToLinear (float value)
-{
-    if (value < 0.04045f)
-        return value / 12.92f;
-    else
-        return std::powf(((value + 0.055f) / 1.055f), 2.4f);
-}
-
-float LinearTosRGB (float value)
-{
-    if (value < 0.0031308f)
-        return value * 12.92f;
-    else
-        return std::powf(value, 1.0f / 2.4f) *  1.055f - 0.055f;
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -1186,6 +790,10 @@ int main (int argc, char** argv)
 /*
 
 TODO:
+
+* make spherical point lights
+
+* directional lights a special case of spherical point lights
 
 * may need literal pathtraced version as ground truth.
 

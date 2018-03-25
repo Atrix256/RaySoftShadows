@@ -3,4 +3,9 @@
   <ItemGroup>
     <ClCompile Include="Source.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="VectorMath.h" />
+    <ClInclude Include="SImageData.h" />
+    <ClInclude Include="RayIntersect.h" />
+  </ItemGroup>
 </Project>
