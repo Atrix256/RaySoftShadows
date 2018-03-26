@@ -26,8 +26,8 @@
 
 #define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 2  // it does this many samples squared per pixel for AA
 
-#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING() 64 // it does this many samples squared per pixel while path tracing
-#define PATHTRACING_RAY_BOUNCE() 4
+#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING() 32 // it does this many samples squared per pixel while path tracing
+#define PATHTRACING_RAY_BOUNCE() 4 // set to 1 to make the pathtracing be like the raytracing
 
 #define FORCE_SINGLE_THREADED() 0 // useful for debugging
 
@@ -45,14 +45,13 @@ static const float c_goldenRatioConjugate = 0.61803398875f;
 //-------------------------------------------------------------------------------------------------------------------
 float3 RandomVectorTowardsLight (float3 lightDir, float radius, float rngX, float rngY)
 {
+    // TODO: is it using radius correctly? it isn't diameter or something by accident right? Compare to pathtraced version.
+    //radius *= 0.5f;
+
     // make basis vectors for the light quad
     lightDir = Normalize(lightDir);
     float3 scaledUAxis = Normalize(Cross(float3{ 0.0f, 1.0f, 0.0f }, lightDir)) * radius;
     float3 scaledVAxis = Normalize(Cross(lightDir, scaledUAxis)) * radius;
-
-    // TODO: is it using radius correctly? it isn't diameter or something by accident right? Compare to pathtraced version.
-
-    radius *= 0.0f;
 
     float r1 = 2.0f * c_pi *rngX;
     float r2 = rngY;
@@ -88,7 +87,7 @@ inline float3 CosineSampleHemisphere (const float3& normal, float rngX, float rn
 //-------------------------------------------------------------------------------------------------------------------
 static SQuad g_quads[] =
 {
-    { { -15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, -15.0f },{ -15.0f, 0.0f, -15.0f }, {0.2f, 0.2f, 0.2f}},
+    { { -15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, 15.0f },{ 15.0f, 0.0f, -15.0f },{ -15.0f, 0.0f, -15.0f }, {1.0f, 1.0f, 1.0f}},
 };
 
 static const SSphere g_spheres[] =
@@ -373,6 +372,9 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
     if (ret.isLight)
         return ret;
 
+    if (ret.hitInfo.collisionTime == -1.0f)
+        return ret;
+
     ret.worldPos = rayPos + rayDir * ret.hitInfo.collisionTime;
 
     // shadow rays
@@ -385,7 +387,7 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
 
         ret.shadowMultipliersPositional[lightIndex] = 1.0f;
 
-        for (size_t sampleIndex = 0; sampleIndex <= SHADOW_RAY_COUNT; ++sampleIndex)
+        for (size_t sampleIndex = 0; sampleIndex < SHADOW_RAY_COUNT; ++sampleIndex)
         {
             float rngX, rngY;
 
@@ -428,8 +430,15 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                 }
                 case RayPattern::Grid:
                 {
-                    sampleX = (float(sampleIndex % SHADOW_RAY_COUNT_GRID_SIZE) + 1.0f) / float(SHADOW_RAY_COUNT_GRID_SIZE + 1);
-                    sampleY = (float(sampleIndex / SHADOW_RAY_COUNT_GRID_SIZE) + 1.0f) / float(SHADOW_RAY_COUNT_GRID_SIZE + 1);
+                    if (SHADOW_RAY_COUNT == 1)
+                    {
+                        sampleX = sampleY = 0.0f;
+                    }
+                    else
+                    {
+                        sampleX = (float(sampleIndex % SHADOW_RAY_COUNT_GRID_SIZE) + 1.0f) / float(SHADOW_RAY_COUNT_GRID_SIZE + 1);
+                        sampleY = (float(sampleIndex / SHADOW_RAY_COUNT_GRID_SIZE) + 1.0f) / float(SHADOW_RAY_COUNT_GRID_SIZE + 1);
+                    }
                     break;
                 }
                 case RayPattern::Stratified:
@@ -441,7 +450,7 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                 static_assert(RAY_PATTERN >= RayPattern::None && RAY_PATTERN <= RayPattern::Stratified,"RAY_PATTERN invalid");
             }
 
-            float3 randomDir = RandomVectorTowardsLight(lightDir, g_positionalLights[lightIndex].radius, sampleX, sampleY);
+            float3 randomDir = RandomVectorTowardsLight(lightDir, g_positionalLights[lightIndex].radius / lightDistance, sampleX, sampleY);
 
             SHitInfo shadowHitInfo;
             shadowHitInfo.collisionTime = lightDistance;
@@ -468,7 +477,7 @@ float3 PixelFunctionShade (const SGbufferPixel& gbufferData)
         return g_skyColor;
 
     if (gbufferData.isLight)
-        return g_skyColor + gbufferData.emissive;
+        return gbufferData.emissive;
 
     float3 ret = g_skyColor * gbufferData.hitInfo.albedo;
 
@@ -698,13 +707,7 @@ float3 PixelFunctionPathTrace(const float3& rayPos, const float3& rayDir, std::m
         lightSphere.albedo = { 0.0f, 0.0f, 0.0f };
 
         if (RayIntersect(rayPos, rayDir, lightSphere, hitInfo))
-        {
-            if (depth > 0)
-            {
-                int ijkl = 0;
-            }
             emissive = g_positionalLights[lightIndex].color;
-        }
     }
 
     // if nothing hit, return the sky color
@@ -723,7 +726,7 @@ float3 PixelFunctionPathTrace(const float3& rayPos, const float3& rayDir, std::m
 
     // return shaded shaded surface color.
     // No need to multiply by N dot L because we cosine sampled the hemisphere, aka it's importance sampled for the NdotL multiplication.
-    return emissive + incomingLight * hitInfo.albedo;
+    return emissive + incomingLight * hitInfo.albedo * c_pi;
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -763,7 +766,7 @@ void Pathtrace(const char* fileName)
                         size_t sampleY = sampleIndex / STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING();
 
                         float stratU = (float(sampleX)+dist(rng)) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING());
-                        float stratV = (float(sampleY)+dist(rng)) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING());
+                        float stratV = -(float(sampleY)+dist(rng)) / float(STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING());
 
                         // calculate uv coordinate of pixel in [-1,1], also correcting for aspect ratio and flipping the vertical axis
                         float u = (((float(pixelIndex % output.m_width)+stratU) / float(output.m_width)) * 2.0f - 1.0f) * aspectRatio;
@@ -874,11 +877,16 @@ int main (int argc, char** argv)
 
 TODO:
 
-? what is the real falloff formula for spherical light sources?
- * for one, it isn't from center of light source, but is from surface, so the falloff is from where the ray intersects with the light. can we get that info? if not, just subtract out radius for a better approximation.
- * secondly, i don't think it's exactly 1/(d*d). find out what it really is
+* there's something weird with the pathtracing where the more bounces you have the brighter the pixels get? maybe something with the skycolor being applied multiple times. Or maybe a pi / not pi thing.
 
-* path tracing light looks rough. You might not be stratified sampling correctly... like you migh tbe doing [-1,1] or [-0.5,0.5] or something
+* is there an issue with pi in the pathtraced vs raytraced version? maybe should switch to physical measurements
+
+? why is the edges of the light so rough looking? we do a lot of samples per pixel in PT and RT, it should smooth out.
+
+* subtract the radius of the light from the light distance used for interesection test AND falloff
+
+* try shining a light from behind the camera to a quad perpendicular to the camera. no distance falloff.   Make sure the quad is the correct color, and same on both pathtraced and raytraced
+
 * "hard 1" doesn't look right. there are 2 shadows and they aren't facing the right way?!
 
 * blurring does weird things to the light now. maybe related to clamping... try clamping linear to sRGB and the reverse to see if it clears it up

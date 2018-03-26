@@ -78,15 +78,15 @@ struct SImageData
 inline float sRGBToLinear(float value)
 {
     if (value < 0.04045f)
-        return value / 12.92f;
+        return clamp(value / 12.92f, 0.0f, 1.0f);
     else
-        return std::powf(((value + 0.055f) / 1.055f), 2.4f);
+        return clamp(std::powf(((value + 0.055f) / 1.055f), 2.4f), 0.0f, 1.0f);
 }
 
 inline float LinearTosRGB(float value)
 {
     if (value < 0.0031308f)
-        return value * 12.92f;
+        return clamp(value * 12.92f, 0.0f, 1.0f);
     else
-        return std::powf(value, 1.0f / 2.4f) *  1.055f - 0.055f;
+        return clamp(std::powf(value, 1.0f / 2.4f) *  1.055f - 0.055f, 0.0f, 1.0f);
 }
