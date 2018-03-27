@@ -783,8 +783,6 @@ void Pathtrace(const char* fileName)
                         *outPixel = Lerp(*outPixel, sample, 1.0f / float(sampleIndex+1));
                     }
 
-                    // TODO: the stratified uv was not working well. it might not be working well in the sampled version either...
-
                     // report progress
                     if (reportProgress)
                     {
@@ -889,54 +887,13 @@ TODO:
 
 * try shining a light from behind the camera to a quad perpendicular to the camera. no distance falloff.   Make sure the quad is the correct color, and same on both pathtraced and raytraced
 
-* blurring does weird things to the light now. maybe related to clamping... try clamping linear to sRGB and the reverse to see if it clears it up
-
-* for path tracing, should you directly sample light maybe?
-
-"hard 1" shadows seem very off... probably indicative of something else being very wrong.
-
-* squared falloff for positional lights
-
-? should we add the sky color (ambient) to all lighting, even in the shadows?
-
-* make spherical point lights
- * and make them render the point lights.
- * emissivive, no lighting of course
-
-* directional lights a special case of spherical point lights
-
-* may need literal pathtraced version as ground truth.
- * just primary rays, no bounces.
-
-?! at work, do you add half a cell to grid? very important to make best use of the grid!
-
 * blue64 and blue 256 don't look any different
  * white 64 and 256 don't look very different either
 
-* blue noise GR doesn't seem very high quality for some reason, seems like a bug?
-
-* maybe make a "ground truth" blue noise, which uses more pixels on the texture, or mitchel's or something.
- * for N samples. shrug.
-
-? does blue noise converge anymore? blue 256 quad doesn't look so great
-
-! verify your quad code with what you made before
-* compare quad with disc. replace if appropriate
-
-? does pcf make sense at all in this context?
+* make a better scene?
 
 * do a blur where you blur NxN sections instead of each pixel reading every other pixel. This simulates something more quickly / easily done in a ray dispatch shader
 * try doing a blur where every 2x2 block is averaged. (a gbuffer blur! maybe depth aware)
-
-* make shading pixels a function, so easier to re-use
-
-? organize into multiple files?
-
-* larger box filter? Especially on pre box
- * also try larger median filter
-* stuff is pretty verbose right now
-
-* a better scene with more interesting geo and lights
 
 * Permutation options...
 + 1) Number of rays 
@@ -952,33 +909,11 @@ TODO:
 
 * try fitting the shadow data to a function? piecewise least squares?
 
-* point light
-* directional light
-* IBL?
-
-? combine directional and positional lights into one list?
-
 * ray marched shadows (single ray that keeps track of closest point)
-* maybe also that one implementation where it's 1 ray per pixel but then blurred data
 
 * animated & make an animated gif of results? (gif is low quality though... maybe ffmpeg?)
 
 * todos
-
-? ambient lighting? or multibounce? (approaching path tracing then though...)
-
-* hard shadows
-* "path traced shadows"
-* compare vs path traced and make sure it converges with higher ray counts?
-* low variance early out?
-* try denoising?
-* i think maybe shooting rays at a disc is the right move, and that ray in cone is not correct.
-
-? red/blue 3d? or nah...
-
-? how does stratified sampling fit in for AA?
-
-* try to find good results
 
 Demos...
 1) Hard shadows
