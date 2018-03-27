@@ -34,21 +34,24 @@ struct SImageData
         return true;
     }
 
-    bool Save (const char* fileName, bool toSRGB = true)
+    bool Save (const char* fileName, bool toSRGB = true, bool applyToneMapping = true)
     {
         // convert from linear f32 to sRGB u8
         std::vector<uint8> pixelsU8;
         pixelsU8.resize(m_pixels.size());
         for (size_t i = 0; i < m_pixels.size(); ++i)
         {
+            // convert from sRGN to linear if we should
+            float value = m_pixels[i];
             if (toSRGB)
-            {
-                pixelsU8[i] = uint8(LinearTosRGB(m_pixels[i])*255.0f);
-            }
-            else
-            {
-                pixelsU8[i] = uint8(m_pixels[i]*255.0f);
-            }
+                value = LinearTosRGB(value);
+
+            // apply tone mapping if we should
+            if (applyToneMapping)
+                value = HDRToSDR(value);
+
+            // clamp and convert to uint8
+            pixelsU8[i] = uint8(clamp(value, 0.0f, 1.0f) * 255.0f);
         }
 
         // save the image
@@ -78,15 +81,23 @@ struct SImageData
 inline float sRGBToLinear(float value)
 {
     if (value < 0.04045f)
-        return clamp(value / 12.92f, 0.0f, 1.0f);
+        return value / 12.92f;
     else
-        return clamp(std::powf(((value + 0.055f) / 1.055f), 2.4f), 0.0f, 1.0f);
+        return std::powf(((value + 0.055f) / 1.055f), 2.4f);
 }
 
 inline float LinearTosRGB(float value)
 {
     if (value < 0.0031308f)
-        return clamp(value * 12.92f, 0.0f, 1.0f);
+        return value * 12.92f;
     else
-        return clamp(std::powf(value, 1.0f / 2.4f) *  1.055f - 0.055f, 0.0f, 1.0f);
+        return std::powf(value, 1.0f / 2.4f) *  1.055f - 0.055f;
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+inline float HDRToSDR(float input)
+{
+    // Reinhard tone mapping with a hard coded exposure adjustment
+    input = input * 2.0f; 
+    return input / (1.0f + input);
 }

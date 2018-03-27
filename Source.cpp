@@ -544,6 +544,8 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
     return ret;
 }
 
+//-------------------------------------------------------------------------------------------------------------------
+
 float3 PixelFunctionShade (const SGbufferPixel& gbufferData)
 {
     if (gbufferData.hitInfo.collisionTime <= 0.0f)
@@ -972,14 +974,13 @@ int main (int argc, char** argv)
 
 TODO:
 
-* the gbuffer filtered tests don't look right, they lose their 
+* make a version where it stochastically chooses which light to sample based on disc size.
 
 * median filter gbuffer
 
-* path trace: try uniform sampling over sphere and multiplying by NdotL, just to make sure it gives same results
-
 ? why is the edges of the light so rough looking? we do a lot of samples per pixel in PT and RT, it should smooth out.
  * maybe because the light is so bright? maybe we need to fully shade each pixel, and combine that, instead of combining when shading
+ * didn't really help... maybe there is a secret to supersampling HDR?
 
 * subtract the radius of the light from the light distance used for interesection test AND falloff
 
