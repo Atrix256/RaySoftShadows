@@ -104,6 +104,8 @@ static const SSphere g_spheres[] =
 static const SPositionalLight g_positionalLights[] =
 {
     { {-1.0f, 5.0f, 6.0f}, 0.5f,{ 10.0f, 10.0f, 10.0f }},
+
+    { { 1.0f, 3.0f, 6.0f}, 0.75f,{ 10.0f, 10.0f, 10.0f }},
 };
 
 static const float  g_cameraDistance = 2.0f;
@@ -435,7 +437,7 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                 {
                     if (SHADOW_RAY_COUNT == 1)
                     {
-                        sampleX = sampleY = 0.0f;
+                        sampleX = sampleY = 0.5f;
                     }
                     else
                     {
@@ -894,16 +896,6 @@ TODO:
 
 * do a blur where you blur NxN sections instead of each pixel reading every other pixel. This simulates something more quickly / easily done in a ray dispatch shader
 * try doing a blur where every 2x2 block is averaged. (a gbuffer blur! maybe depth aware)
-
-* Permutation options...
-+ 1) Number of rays 
-- 2) Random number source: white noise, hash without sine, blue noise + golden ratio
-- 3) Filter in pre or in post
-- 4) Filter type: median, box, depth aware box
-- 5) filter size: 3, 5?
-- 6) Sample target: no target (path tracing?), disc, square. Cone or no?
-- 7) Multi sample (re-use shadow info from first sample though IMO). 4x SSAA
-- 8) Low variance early out. Dont forget the coprime number (5) for shuffling!
 
 * try gaussian blur too?
 
