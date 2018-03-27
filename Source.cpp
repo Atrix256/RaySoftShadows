@@ -26,8 +26,10 @@
 
 #define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 2  // it does this many samples squared per pixel for AA
 
-#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING() 64 // it does this many samples squared per pixel while path tracing
+#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING() 256 // it does this many samples squared per pixel while path tracing
 #define PATHTRACING_RAY_BOUNCE() 4 // set to 1 to make the pathtracing be like the raytracing
+
+#define DO_PATHTRACE() 0 // takes about 10 minutes on my machine
 
 #define FORCE_SINGLE_THREADED() 0 // useful for debugging
 
@@ -86,6 +88,34 @@ inline float3 CosineSampleHemisphere (const float3& normal, float rngX, float rn
     d = Normalize(d);
 
     return d;
+}
+
+//=================================================================================
+inline float3 UniformSampleHemisphere (const float3& N, float rngX, float rngY)
+{
+    // Uniform point on sphere
+    // from http://mathworld.wolfram.com/SpherePointPicking.html
+    float u = rngX;
+    float v = rngY;
+
+    float theta = 2.0f * c_pi * u;
+    float phi = acos(2.0f * v - 1.0f);
+
+    float cosTheta = cos(theta);
+    float sinTheta = sin(theta);
+    float cosPhi = cos(phi);
+    float sinPhi = sin(phi);
+
+    float3 dir;
+    dir[0] = cosTheta * sinPhi;
+    dir[1] = sinTheta * sinPhi;
+    dir[2] = cosPhi;
+
+    // if our vector is facing the wrong way vs the normal, flip it!
+    if (Dot(dir, N) <= 0.0f)
+        dir = dir * -1.0f;
+
+    return dir;
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -204,28 +234,26 @@ void Convolve (const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest, std:
 
 //-------------------------------------------------------------------------------------------------------------------
 
-template <int RADIUS, size_t CHANNELS>
-void BoxBlur(const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest)
+template <int RADIUS>
+std::array<float, (1 + RADIUS * 2)*(1 + RADIUS * 2)> MakeBoxBlurKernel()
 {
-    static const size_t numPixelsInFilter = (1 + RADIUS * 2) * (1 + RADIUS * 2);
+    std::array<float, (1 + RADIUS * 2)*(1 + RADIUS * 2)> ret;
 
-    std::array<float, numPixelsInFilter> kernel;
-
-    for (float& f : kernel)
+    for (float& f : ret)
         f = 1.0f;
 
-    Convolve<RADIUS, CHANNELS>(src, dest, kernel);
+    return ret;
 }
 
 //-------------------------------------------------------------------------------------------------------------------
 
-template <int RADIUS, size_t CHANNELS>
-void TriangleBlur(const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest)
+template <int RADIUS>
+std::array<float, (1 + RADIUS * 2)*(1 + RADIUS * 2)> MakeTriangleBlurKernel()
 {
+    std::array<float, (1 + RADIUS * 2)*(1 + RADIUS * 2)> ret;
+
     static const size_t numPixelsOneSide = (1 + RADIUS * 2);
     static const size_t numPixelsInFilter = numPixelsOneSide * numPixelsOneSide;
-
-    std::array<float, numPixelsInFilter> kernel;
 
     for (size_t i = 0; i < numPixelsInFilter; ++i)
     {
@@ -235,9 +263,27 @@ void TriangleBlur(const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest)
         float triangleX = (x <= RADIUS) ? float(x + 1) : float(numPixelsOneSide - x);
         float triangleY = (y <= RADIUS) ? float(y + 1) : float(numPixelsOneSide - y);
 
-        kernel[i] = triangleX * triangleY;
+        ret[i] = triangleX * triangleY;
     }
 
+    return ret;
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
+template <int RADIUS, size_t CHANNELS>
+void BoxBlur(const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest)
+{
+    auto kernel = MakeBoxBlurKernel<RADIUS>();
+    Convolve<RADIUS, CHANNELS>(src, dest, kernel);
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
+template <int RADIUS, size_t CHANNELS>
+void TriangleBlur(const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest)
+{
+    auto kernel = MakeTriangleBlurKernel<RADIUS>();
     Convolve<RADIUS, CHANNELS>(src, dest, kernel);
 }
 
@@ -286,9 +332,13 @@ void MedianFilter(const SImageData<CHANNELS>& src, SImageData<CHANNELS>& dest)
 //-------------------------------------------------------------------------------------------------------------------
 
 template <int RADIUS, size_t SAMPLES_PER_PIXEL>
-void BoxBlurShadowMultipliers (const std::vector<SGbufferPixel>& src, std::vector<SGbufferPixel>& dest, size_t width, size_t height)
+void Convolve (const std::vector<SGbufferPixel>& src, std::vector<SGbufferPixel>& dest, size_t width, size_t height, std::array<float, (1 + RADIUS * 2) * (1 + RADIUS * 2)>& kernel)
 {
-    static const size_t numPixelsInFilter = (1 + RADIUS * 2) * (1 + RADIUS * 2);
+    static const size_t numPixelsOneSide = (1 + RADIUS * 2);
+
+    float totalKernelWeight = 0.0f;
+    for (float f : kernel)
+        totalKernelWeight += f;
 
     dest = src;
 
@@ -316,17 +366,35 @@ void BoxBlurShadowMultipliers (const std::vector<SGbufferPixel>& src, std::vecto
                         const SGbufferPixel& inPixel = src[(sampleY * width + sampleX) * SAMPLES_PER_PIXEL + sampleIndex];
 
                         for (size_t index = 0; index < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++index)
-                            outPixel->shadowMultipliersPositional[index] += inPixel.shadowMultipliersPositional[index];
+                            outPixel->shadowMultipliersPositional[index] += inPixel.shadowMultipliersPositional[index] * kernel[(offsetY + RADIUS) * numPixelsOneSide + (offsetX + RADIUS)];
                     }
                 }
 
                 for (float& f : outPixel->shadowMultipliersPositional)
-                    f /= float(numPixelsInFilter);
+                    f /= totalKernelWeight;
 
                 ++outPixel;
             }
         }
     }
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
+template <int RADIUS, size_t SAMPLES_PER_PIXEL>
+void BoxBlurShadowMultipliers (const std::vector<SGbufferPixel>& src, std::vector<SGbufferPixel>& dest, size_t width, size_t height)
+{
+    auto kernel = MakeBoxBlurKernel<RADIUS>();
+    Convolve<RADIUS, SAMPLES_PER_PIXEL>(src, dest, width, height, kernel);
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+
+template <int RADIUS, size_t SAMPLES_PER_PIXEL>
+void TriangleBlurShadowMultipliers (const std::vector<SGbufferPixel>& src, std::vector<SGbufferPixel>& dest, size_t width, size_t height)
+{
+    auto kernel = MakeTriangleBlurKernel<RADIUS>();
+    Convolve<RADIUS, SAMPLES_PER_PIXEL>(src, dest, width, height, kernel);
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -608,11 +676,13 @@ void GeneratePixels(const char* task, const char* baseFileName, EProcess preProc
     {
         // for pre-processing the gbuffer, we want it to be as if we only took 1 shadow sample per pixel before filtering.
         std::vector<SGbufferPixel> gbuffer1ShadowSample = gbuffer;
+        /*
         for (SGbufferPixel& pixel : gbuffer1ShadowSample)
         {
             for (size_t lightIndex = 1; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
                 pixel.shadowMultipliersPositional[lightIndex] = pixel.shadowMultipliersPositional[0];
         }
+        */
 
         std::vector<SGbufferPixel> gbufferFiltered;
 
@@ -631,11 +701,31 @@ void GeneratePixels(const char* task, const char* baseFileName, EProcess preProc
         sprintf_s(fileName, baseFileName, "_prebox7");
         output.Save(fileName);
 
+        TriangleBlurShadowMultipliers<1, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
+        sprintf_s(fileName, baseFileName, "_pretriangle3");
+        output.Save(fileName);
+
+        TriangleBlurShadowMultipliers<2, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
+        sprintf_s(fileName, baseFileName, "_pretriangle5");
+        output.Save(fileName);
+
+        TriangleBlurShadowMultipliers<3, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
+        sprintf_s(fileName, baseFileName, "_pretriangle7");
+        output.Save(fileName);
+
         if (preProcess == EProcess::Exhaustive)
         {
             BoxBlurShadowMultipliers<7, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
             ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
             sprintf_s(fileName, baseFileName, "_prebox15");
+            output.Save(fileName);
+
+            TriangleBlurShadowMultipliers<7, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+            ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
+            sprintf_s(fileName, baseFileName, "_pretriangle15");
             output.Save(fileName);
         }
     }
@@ -653,41 +743,41 @@ void GeneratePixels(const char* task, const char* baseFileName, EProcess preProc
         SImageData<3> filtered;
 
         BoxBlur<1>(output, filtered);
-        sprintf_s(fileName, baseFileName, "_box3");
+        sprintf_s(fileName, baseFileName, "_postbox3");
         filtered.Save(fileName);
 
         BoxBlur<2>(output, filtered);
-        sprintf_s(fileName, baseFileName, "_box5");
+        sprintf_s(fileName, baseFileName, "_postbox5");
         filtered.Save(fileName);
 
         TriangleBlur<1>(output, filtered);
-        sprintf_s(fileName, baseFileName, "_triangle3");
+        sprintf_s(fileName, baseFileName, "_posttriangle3");
         filtered.Save(fileName);
 
         TriangleBlur<2>(output, filtered);
-        sprintf_s(fileName, baseFileName, "_triangle5");
+        sprintf_s(fileName, baseFileName, "_posttriangle5");
         filtered.Save(fileName);
 
         MedianFilter<1>(output, filtered);
-        sprintf_s(fileName, baseFileName, "_median3");
+        sprintf_s(fileName, baseFileName, "_postmedian3");
         filtered.Save(fileName);
 
         MedianFilter<2>(output, filtered);
-        sprintf_s(fileName, baseFileName, "_median5");
+        sprintf_s(fileName, baseFileName, "_postmedian5");
         filtered.Save(fileName);
 
         if (preProcess == EProcess::Exhaustive)
         {
             BoxBlur<7>(output, filtered);
-            sprintf_s(fileName, baseFileName, "_box15");
+            sprintf_s(fileName, baseFileName, "_postbox15");
             filtered.Save(fileName);
 
             TriangleBlur<7>(output, filtered);
-            sprintf_s(fileName, baseFileName, "_triangle15");
+            sprintf_s(fileName, baseFileName, "_posttriangle15");
             filtered.Save(fileName);
 
             MedianFilter<7>(output, filtered);
-            sprintf_s(fileName, baseFileName, "_median15");
+            sprintf_s(fileName, baseFileName, "_postmedian15");
             filtered.Save(fileName);
         }
     }
@@ -842,7 +932,9 @@ int main (int argc, char** argv)
         g_quads[i].CalculateNormal();
 
     // path traced version
-    Pathtrace("out/Pathtrace.png");
+    #if DO_PATHTRACE()
+        Pathtrace("out/Pathtrace.png");
+    #endif
 
     // make sampled images
     GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard_1%s.png", EProcess::No, EProcess::No);
@@ -878,14 +970,14 @@ int main (int argc, char** argv)
 
 TODO:
 
-* a few things look weird when blurred, like they dont look like their unblurred version much?
+* the gbuffer filtered tests don't look right, they lose their 
 
-* get other gbuffer filtering methods working
+* median filter gbuffer
 
 * path trace: try uniform sampling over sphere and multiplying by NdotL, just to make sure it gives same results
 
 ? why is the edges of the light so rough looking? we do a lot of samples per pixel in PT and RT, it should smooth out.
- * maybe because the light is so bright?
+ * maybe because the light is so bright? maybe we need to fully shade each pixel, and combine that, instead of combining when shading
 
 * subtract the radius of the light from the light distance used for interesection test AND falloff
 
@@ -899,25 +991,19 @@ TODO:
 * do a blur where you blur NxN sections instead of each pixel reading every other pixel. This simulates something more quickly / easily done in a ray dispatch shader
 * try doing a blur where every 2x2 block is averaged. (a gbuffer blur! maybe depth aware)
 
-* try gaussian blur too?
+* try gaussian blur too? at least for white 1 aka exhaustive
 
 * try fitting the shadow data to a function? piecewise least squares?
 
 * ray marched shadows (single ray that keeps track of closest point)
+ * and this way https://www.shadertoy.com/view/lsKcDD
 
 * animated & make an animated gif of results? (gif is low quality though... maybe ffmpeg?)
 
 * todos
 
-Demos...
-1) Hard shadows
-2) stratified sampling
-3) stratified sampling with jitter
-4) cone
-
-BLOG:
+BLOG Notes:
 * Using gamma 2.2
 * box, triangle, gaussian are separable which is faster
-? is median seprable?
 
 */
