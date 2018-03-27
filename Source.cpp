@@ -676,13 +676,15 @@ void GeneratePixels(const char* task, const char* baseFileName, EProcess preProc
     {
         // for pre-processing the gbuffer, we want it to be as if we only took 1 shadow sample per pixel before filtering.
         std::vector<SGbufferPixel> gbuffer1ShadowSample = gbuffer;
-        /*
-        for (SGbufferPixel& pixel : gbuffer1ShadowSample)
+        size_t pixelIndex = 0;
+        while (pixelIndex < gbuffer1ShadowSample.size())
         {
-            for (size_t lightIndex = 1; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
-                pixel.shadowMultipliersPositional[lightIndex] = pixel.shadowMultipliersPositional[0];
+            for (size_t sampleIndex = 1; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
+                for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+                    gbuffer1ShadowSample[pixelIndex+sampleIndex].shadowMultipliersPositional[lightIndex] = gbuffer1ShadowSample[pixelIndex].shadowMultipliersPositional[lightIndex];
+
+            pixelIndex += STRATIFIED_SAMPLE_COUNT();
         }
-        */
 
         std::vector<SGbufferPixel> gbufferFiltered;
 
