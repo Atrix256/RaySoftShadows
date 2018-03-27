@@ -29,6 +29,7 @@ struct SHitInfo
     float collisionTime = -1.0f;
     float3 normal;
     float3 albedo = { 0.0f, 0.0f, 0.0f };
+    float3 emissive = { 0.0f, 0.0f, 0.0f };
 };
 
 struct SPositionalLight

@@ -26,7 +26,7 @@
 
 #define STRATIFIED_SAMPLE_COUNT_ONE_AXIS() 2  // it does this many samples squared per pixel for AA
 
-#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING() 32 // it does this many samples squared per pixel while path tracing
+#define STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING() 64 // it does this many samples squared per pixel while path tracing
 #define PATHTRACING_RAY_BOUNCE() 4 // set to 1 to make the pathtracing be like the raytracing
 
 #define FORCE_SINGLE_THREADED() 0 // useful for debugging
@@ -52,9 +52,6 @@ enum class EProcess
 //-------------------------------------------------------------------------------------------------------------------
 float3 RandomVectorTowardsLight (float3 lightDir, float radius, float rngX, float rngY)
 {
-    // TODO: is it using radius correctly? it isn't diameter or something by accident right? Compare to pathtraced version.
-    //radius *= 0.5f;
-
     // make basis vectors for the light quad
     lightDir = Normalize(lightDir);
     float3 scaledUAxis = Normalize(Cross(float3{ 0.0f, 1.0f, 0.0f }, lightDir)) * radius;
@@ -155,7 +152,6 @@ struct SGbufferPixel
     float u, v;
     float shadowMultipliersPositional[sizeof(g_positionalLights) / sizeof(g_positionalLights[0])];
     bool isLight = false;
-    float3 emissive;
     float3 worldPos;
 };
 
@@ -373,7 +369,7 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
         if (RayIntersect(rayPos, rayDir, lightSphere, ret.hitInfo))
         {
             ret.isLight = true;
-            ret.emissive = g_positionalLights[lightIndex].color;
+            ret.hitInfo.emissive = g_positionalLights[lightIndex].color;
         }
     }
     if (ret.isLight)
@@ -484,7 +480,7 @@ float3 PixelFunctionShade (const SGbufferPixel& gbufferData)
         return g_skyColor;
 
     if (gbufferData.isLight)
-        return gbufferData.emissive;
+        return gbufferData.hitInfo.emissive;
 
     float3 ret = g_skyColor * gbufferData.hitInfo.albedo;
 
@@ -706,10 +702,7 @@ float3 PixelFunctionPathTrace(const float3& rayPos, const float3& rayDir, std::m
     for (size_t i = 0; i < sizeof(g_quads) / sizeof(g_quads[0]); ++i)
         RayIntersect(rayPos, rayDir, g_quads[i], hitInfo);
 
-    // TODO: make emissive part of the hitinfo structure like albedo is.
-
     // check for intersections with spherical lights
-    float3 emissive = { 0.0f, 0.0f, 0.0f };
     for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
     {
         SSphere lightSphere;
@@ -718,7 +711,7 @@ float3 PixelFunctionPathTrace(const float3& rayPos, const float3& rayDir, std::m
         lightSphere.albedo = { 0.0f, 0.0f, 0.0f };
 
         if (RayIntersect(rayPos, rayDir, lightSphere, hitInfo))
-            emissive = g_positionalLights[lightIndex].color;
+            hitInfo.emissive = g_positionalLights[lightIndex].color;
     }
 
     // if nothing hit, return the sky color
@@ -737,7 +730,7 @@ float3 PixelFunctionPathTrace(const float3& rayPos, const float3& rayDir, std::m
 
     // return shaded shaded surface color.
     // No need to multiply by N dot L because we cosine sampled the hemisphere, aka it's importance sampled for the NdotL multiplication.
-    return emissive + incomingLight * hitInfo.albedo;
+    return hitInfo.emissive + incomingLight * hitInfo.albedo;
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -884,6 +877,8 @@ int main (int argc, char** argv)
 /*
 
 TODO:
+
+* get other gbuffer filtering methods working
 
 * path trace: try uniform sampling over sphere and multiplying by NdotL, just to make sure it gives same results
 
