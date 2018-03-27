@@ -42,6 +42,13 @@ static const float c_goldenRatioConjugate = 0.61803398875f;
 #define STRATIFIED_SAMPLE_COUNT() (STRATIFIED_SAMPLE_COUNT_ONE_AXIS()*STRATIFIED_SAMPLE_COUNT_ONE_AXIS())
 #define STRATIFIED_SAMPLE_COUNT_PATHTRACING() (STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING()*STRATIFIED_SAMPLE_COUNT_ONE_AXIS_PATHTRACING())
 
+enum class EProcess
+{
+    No,
+    Yes,
+    Exhaustive
+};
+
 //-------------------------------------------------------------------------------------------------------------------
 float3 RandomVectorTowardsLight (float3 lightDir, float radius, float rngX, float rngY)
 {
@@ -490,10 +497,8 @@ float3 PixelFunctionShade (const SGbufferPixel& gbufferData)
 
         float NdotL = Dot(lightDir, gbufferData.hitInfo.normal);
         if (NdotL > 0.0f)
-            ret = ret + g_positionalLights[lightIndex].color * gbufferData.hitInfo.albedo * NdotL * gbufferData.shadowMultipliersPositional[lightIndex] * falloff;
+            ret = ret + g_positionalLights[lightIndex].color * gbufferData.hitInfo.albedo * NdotL * gbufferData.shadowMultipliersPositional[lightIndex] * falloff / c_pi;
     }
-
-    // TODO: account for sky color too!
 
     return ret;
 }
@@ -520,7 +525,7 @@ void ShadePixels(const std::vector<SGbufferPixel>& gbuffer, SImageData<3>& outpu
 //-------------------------------------------------------------------------------------------------------------------
 
 template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE>
-void GeneratePixels(const char* task, const char* baseFileName, bool doPreProcessing, bool doPostProcessing)
+void GeneratePixels(const char* task, const char* baseFileName, EProcess preProcess, EProcess postProcess)
 {
     char fileName[256];
 
@@ -601,7 +606,7 @@ void GeneratePixels(const char* task, const char* baseFileName, bool doPreProces
     );
 
     // do gbuffer processing if we should
-    if (doPreProcessing)
+    if (preProcess != EProcess::No)
     {
         // for pre-processing the gbuffer, we want it to be as if we only took 1 shadow sample per pixel before filtering.
         std::vector<SGbufferPixel> gbuffer1ShadowSample = gbuffer;
@@ -628,10 +633,13 @@ void GeneratePixels(const char* task, const char* baseFileName, bool doPreProces
         sprintf_s(fileName, baseFileName, "_prebox7");
         output.Save(fileName);
 
-        BoxBlurShadowMultipliers<7, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
-        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
-        sprintf_s(fileName, baseFileName, "_prebox15");
-        output.Save(fileName);
+        if (preProcess == EProcess::Exhaustive)
+        {
+            BoxBlurShadowMultipliers<7, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+            ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
+            sprintf_s(fileName, baseFileName, "_prebox15");
+            output.Save(fileName);
+        }
     }
 
     // make and save the unprocessed image
@@ -642,7 +650,7 @@ void GeneratePixels(const char* task, const char* baseFileName, bool doPreProces
     }
 
     // do image post processing if we should
-    if (doPostProcessing)
+    if (postProcess != EProcess::No)
     {
         SImageData<3> filtered;
 
@@ -654,20 +662,12 @@ void GeneratePixels(const char* task, const char* baseFileName, bool doPreProces
         sprintf_s(fileName, baseFileName, "_box5");
         filtered.Save(fileName);
 
-        BoxBlur<7>(output, filtered);
-        sprintf_s(fileName, baseFileName, "_box15");
-        filtered.Save(fileName);
-
         TriangleBlur<1>(output, filtered);
         sprintf_s(fileName, baseFileName, "_triangle3");
         filtered.Save(fileName);
 
         TriangleBlur<2>(output, filtered);
         sprintf_s(fileName, baseFileName, "_triangle5");
-        filtered.Save(fileName);
-
-        TriangleBlur<7>(output, filtered);
-        sprintf_s(fileName, baseFileName, "_triangle15");
         filtered.Save(fileName);
 
         MedianFilter<1>(output, filtered);
@@ -678,9 +678,20 @@ void GeneratePixels(const char* task, const char* baseFileName, bool doPreProces
         sprintf_s(fileName, baseFileName, "_median5");
         filtered.Save(fileName);
 
-        MedianFilter<7>(output, filtered);
-        sprintf_s(fileName, baseFileName, "_median15");
-        filtered.Save(fileName);
+        if (preProcess == EProcess::Exhaustive)
+        {
+            BoxBlur<7>(output, filtered);
+            sprintf_s(fileName, baseFileName, "_box15");
+            filtered.Save(fileName);
+
+            TriangleBlur<7>(output, filtered);
+            sprintf_s(fileName, baseFileName, "_triangle15");
+            filtered.Save(fileName);
+
+            MedianFilter<7>(output, filtered);
+            sprintf_s(fileName, baseFileName, "_median15");
+            filtered.Save(fileName);
+        }
     }
 }
 
@@ -715,7 +726,7 @@ float3 PixelFunctionPathTrace(const float3& rayPos, const float3& rayDir, std::m
         return g_skyColor;
 
     // recurse
-    float3 incomingLight = g_skyColor;
+    float3 incomingLight = { 0.0f, 0.0f, 0.0f };
     if (depth < PATHTRACING_RAY_BOUNCE())
     {
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
@@ -726,7 +737,7 @@ float3 PixelFunctionPathTrace(const float3& rayPos, const float3& rayDir, std::m
 
     // return shaded shaded surface color.
     // No need to multiply by N dot L because we cosine sampled the hemisphere, aka it's importance sampled for the NdotL multiplication.
-    return emissive + incomingLight * hitInfo.albedo * c_pi;
+    return emissive + incomingLight * hitInfo.albedo;
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -840,34 +851,31 @@ int main (int argc, char** argv)
     // path traced version
     Pathtrace("out/Pathtrace.png");
 
-    // TODO: temp!
-    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard_1%s.png", false, false);
-    GeneratePixels<256, 3, RayPattern::None, RNGSource::WhiteNoise>("White 256", "out/white_256%s.png", false, false);
-    return 0;
-
     // make sampled images
-    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise>("White 1", "out/white_1%s.png", true, true);
-    GeneratePixels<2, 3, RayPattern::None, RNGSource::WhiteNoise>("White 2", "out/white_2%s.png", true, false);
-    GeneratePixels<4, 3, RayPattern::None, RNGSource::WhiteNoise>("White 4", "out/white_4%s.png", true, false);
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise>("White 8", "out/white_8%s.png", true, false);
-    GeneratePixels<64, 3, RayPattern::None, RNGSource::WhiteNoise>("White 64", "out/white_64%s.png", false, false);
-    GeneratePixels<256, 3, RayPattern::None, RNGSource::WhiteNoise>("White 256", "out/white_256%s.png", false, false);
+    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard_1%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<8, 3, RayPattern::Grid, RNGSource::WhiteNoise>("Grid 8", "out/grid_8%s.png", true, false);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise>("White 1", "out/white_1%s.png", EProcess::Exhaustive, EProcess::Exhaustive);
+    GeneratePixels<2, 3, RayPattern::None, RNGSource::WhiteNoise>("White 2", "out/white_2%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<4, 3, RayPattern::None, RNGSource::WhiteNoise>("White 4", "out/white_4%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise>("White 8", "out/white_8%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<64, 3, RayPattern::None, RNGSource::WhiteNoise>("White 64", "out/white_64%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<256, 3, RayPattern::None, RNGSource::WhiteNoise>("White 256", "out/white_256%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 1", "out/blue_1%s.png", true, false);
-    GeneratePixels<2, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 2", "out/blue_2%s.png", true, false);
-    GeneratePixels<4, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 4", "out/blue_4%s.png", true, false);
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 8", "out/blue_8%s.png", true, false);
-    GeneratePixels<64, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 64", "out/blue_64%s.png", false, false);
-    GeneratePixels<256, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 256", "out/blue_256%s.png", false, false);
+    GeneratePixels<9, 3, RayPattern::Grid, RNGSource::WhiteNoise>("Grid 9", "out/grid_9%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<256, 16, RayPattern::Grid, RNGSource::WhiteNoise>("Grid 256", "out/grid_256%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White 8", "out/stratified_white_8%s.png", true, false);
-    GeneratePixels<8, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 8", "out/stratified_blue_8%s.png", true, false);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 1", "out/blue_1%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<2, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 2", "out/blue_2%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<4, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 4", "out/blue_4%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 8", "out/blue_8%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<64, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 64", "out/blue_64%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<256, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 256", "out/blue_256%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 4", "out/stratified4_blue_4%s.png", true, false);
+    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White 4", "out/stratified4_blue_4%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<9, 3, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White 9", "out/stratified_white_9%s.png", EProcess::Yes, EProcess::No);
 
-    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard_1%s.png", false, false);
+    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 4", "out/stratified4_blue_4%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<9, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 9", "out/stratified_blue_9%s.png", EProcess::Yes, EProcess::No);
 
     system("pause");
     return 0;
@@ -877,17 +885,14 @@ int main (int argc, char** argv)
 
 TODO:
 
-* there's something weird with the pathtracing where the more bounces you have the brighter the pixels get? maybe something with the skycolor being applied multiple times. Or maybe a pi / not pi thing.
-
-* is there an issue with pi in the pathtraced vs raytraced version? maybe should switch to physical measurements
+* path trace: try uniform sampling over sphere and multiplying by NdotL, just to make sure it gives same results
 
 ? why is the edges of the light so rough looking? we do a lot of samples per pixel in PT and RT, it should smooth out.
+ * maybe because the light is so bright?
 
 * subtract the radius of the light from the light distance used for interesection test AND falloff
 
 * try shining a light from behind the camera to a quad perpendicular to the camera. no distance falloff.   Make sure the quad is the correct color, and same on both pathtraced and raytraced
-
-* "hard 1" doesn't look right. there are 2 shadows and they aren't facing the right way?!
 
 * blurring does weird things to the light now. maybe related to clamping... try clamping linear to sRGB and the reverse to see if it clears it up
 
@@ -911,6 +916,7 @@ TODO:
 ?! at work, do you add half a cell to grid? very important to make best use of the grid!
 
 * blue64 and blue 256 don't look any different
+ * white 64 and 256 don't look very different either
 
 * blue noise GR doesn't seem very high quality for some reason, seems like a bug?
 
