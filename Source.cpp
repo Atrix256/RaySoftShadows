@@ -878,6 +878,8 @@ int main (int argc, char** argv)
 
 TODO:
 
+* a few things look weird when blurred, like they dont look like their unblurred version much?
+
 * get other gbuffer filtering methods working
 
 * path trace: try uniform sampling over sphere and multiplying by NdotL, just to make sure it gives same results
