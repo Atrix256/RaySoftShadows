@@ -499,21 +499,19 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
         selectedLightIndex = clamp(lightIndex, (size_t)0, c_numLights-1);
     }
 
-    // TODO: stochastic light choice might be a bad idea. What's the default for untested lights... shadowed or unshadowed?
-
     // shadow rays
     float3 pixelPos = rayPos + rayDir * ret.hitInfo.collisionTime;
     float3 shadowPos = pixelPos + ret.hitInfo.normal * c_rayEpsilon;
     for (size_t lightIndex = 0; lightIndex < c_numLights; ++lightIndex)
     {
+        ret.shadowMultipliersPositional[lightIndex] = 0.0f;
+
         if (selectedLightIndex != c_numLights && lightIndex != selectedLightIndex)
             continue;
 
         float3 lightDir = Normalize(g_positionalLights[lightIndex].position - ret.worldPos);
         float lightDistance = Length(g_positionalLights[lightIndex].position - ret.worldPos);
         float lightDiscRadius = g_positionalLights[lightIndex].radius / lightDistance;
-
-        ret.shadowMultipliersPositional[lightIndex] = 1.0f;
 
         for (size_t sampleIndex = 0; sampleIndex < SHADOW_RAY_COUNT; ++sampleIndex)
         {
@@ -643,16 +641,15 @@ void ShadePixels(const std::vector<SGbufferPixel>& gbuffer, SImageData<3>& outpu
 
 //-------------------------------------------------------------------------------------------------------------------
 
-template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE, bool STOCHASTIC_LIGHT_SOURCE>
+template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE, bool STOCHASTIC_LIGHT_SOURCE, size_t SHADOW_RESOLUTION_DIVIDER>
 void GeneratePixels(const char* task, const char* baseFileName, EProcess preProcess, EProcess postProcess)
 {
     char fileName[256];
 
-    SImageData<3> output(IMAGE_WIDTH(), IMAGE_HEIGHT());
-    const size_t numPixels = output.m_width * output.m_height;
+    float aspectRatio = float(IMAGE_WIDTH()) / float(IMAGE_HEIGHT());
 
-    float aspectRatio = float(output.m_width) / float(output.m_height);
-
+    SImageData<3> output(IMAGE_WIDTH()/ SHADOW_RESOLUTION_DIVIDER, IMAGE_HEIGHT()/ SHADOW_RESOLUTION_DIVIDER);
+    size_t numPixels = output.m_width * output.m_height;
     std::vector<SGbufferPixel> gbuffer;
     gbuffer.resize(numPixels*STRATIFIED_SAMPLE_COUNT());
 
@@ -723,6 +720,42 @@ void GeneratePixels(const char* task, const char* baseFileName, EProcess preProc
                 printf("\rGbuffer: 100%%\n");
         }
     );
+
+    // upsize the gbuffer and output if we should
+    // TODO: this isn't quite right. need to shrink the shadow gbuffer data. can't upsize the entire gbuffer.
+    if (SHADOW_RESOLUTION_DIVIDER != 1)
+    {
+        SImageData<3> newOutput(IMAGE_WIDTH(), IMAGE_HEIGHT());
+
+        size_t newNumPixels = newOutput.m_width * newOutput.m_height;
+        
+        std::vector<SGbufferPixel> newGbuffer;
+        newGbuffer.resize(newNumPixels*STRATIFIED_SAMPLE_COUNT());
+
+        for (size_t destY = 0; destY < IMAGE_HEIGHT(); ++destY)
+        {
+            size_t srcY = clamp(destY / SHADOW_RESOLUTION_DIVIDER, (size_t)0, output.m_height - 1);
+            for (size_t destX = 0; destX < IMAGE_WIDTH(); ++destX)
+            {
+                size_t srcX = clamp(destX / SHADOW_RESOLUTION_DIVIDER, (size_t)0, output.m_width - 1);
+
+                const SGbufferPixel* src = &gbuffer[(srcY*output.m_width + srcX)* STRATIFIED_SAMPLE_COUNT()];
+                SGbufferPixel* dest = &newGbuffer[(destY*newOutput.m_width + destX)* STRATIFIED_SAMPLE_COUNT()];
+
+                for (size_t sampleIndex = 0; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
+                {
+                    for (size_t lightIndex = 0; lightIndex < c_numLights; ++lightIndex)
+                    {
+                        dest[sampleIndex].shadowMultipliersPositional[lightIndex] = src[sampleIndex].shadowMultipliersPositional[lightIndex];
+                    }
+                }
+            }
+        }
+
+        output = newOutput;
+        gbuffer = newGbuffer;
+        numPixels = newNumPixels;
+    }
 
     // do gbuffer processing if we should
     if (preProcess != EProcess::No)
@@ -991,32 +1024,38 @@ int main (int argc, char** argv)
         Pathtrace("out/A_Pathtrace.png");
     #endif
 
+        // TODO: move to end
+        GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR, false, 2>("Blue 1 Half", "out/I_blue_1_half%s.png", EProcess::Yes, EProcess::No);
+        GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR, false, 3>("Blue 1 Third", "out/I_blue_1_thirds.png", EProcess::Yes, EProcess::No);
+
     // make sampled images
-    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise, false>("Hard", "out/B_hard_1%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise, false, 1>("Hard", "out/B_hard_1%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise, false>("White 1", "out/C_white_1%s.png", EProcess::Exhaustive, EProcess::Exhaustive);
-    GeneratePixels<2, 3, RayPattern::None, RNGSource::WhiteNoise, false>("White 2", "out/C_white_2%s.png", EProcess::No, EProcess::No);
-    GeneratePixels<4, 3, RayPattern::None, RNGSource::WhiteNoise, false>("White 4", "out/C_white_4%s.png", EProcess::No, EProcess::No);
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise, false>("White 8", "out/C_white_8%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<256, 3, RayPattern::None, RNGSource::WhiteNoise, false>("White 256", "out/C_white_256%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise, false, 1>("White 1", "out/C_white_1%s.png", EProcess::Exhaustive, EProcess::Exhaustive);
+    GeneratePixels<2, 3, RayPattern::None, RNGSource::WhiteNoise, false, 1>("White 2", "out/C_white_2%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<4, 3, RayPattern::None, RNGSource::WhiteNoise, false, 1>("White 4", "out/C_white_4%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise, false, 1>("White 8", "out/C_white_8%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<256, 3, RayPattern::None, RNGSource::WhiteNoise, false, 1>("White 256", "out/C_white_256%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<9, 3, RayPattern::Grid, RNGSource::WhiteNoise, false>("Grid 9", "out/D_grid_9%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<256, 16, RayPattern::Grid, RNGSource::WhiteNoise, false>("Grid 256", "out/D_grid_256%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<9, 3, RayPattern::Grid, RNGSource::WhiteNoise, false, 1>("Grid 9", "out/D_grid_9%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<256, 16, RayPattern::Grid, RNGSource::WhiteNoise, false, 1>("Grid 256", "out/D_grid_256%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR, false>("Blue 1", "out/E_blue_1%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<2, 3, RayPattern::None, RNGSource::BlueNoiseGR, false>("Blue 2", "out/E_blue_2%s.png", EProcess::No, EProcess::No);
-    GeneratePixels<4, 3, RayPattern::None, RNGSource::BlueNoiseGR, false>("Blue 4", "out/E_blue_4%s.png", EProcess::No, EProcess::No);
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR, false>("Blue 8", "out/E_blue_8%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<256, 3, RayPattern::None, RNGSource::BlueNoiseGR, false>("Blue 256", "out/E_blue_256%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR, false, 1>("Blue 1", "out/E_blue_1%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<2, 3, RayPattern::None, RNGSource::BlueNoiseGR, false, 1>("Blue 2", "out/E_blue_2%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<4, 3, RayPattern::None, RNGSource::BlueNoiseGR, false, 1>("Blue 4", "out/E_blue_4%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR, false, 1>("Blue 8", "out/E_blue_8%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<256, 3, RayPattern::None, RNGSource::BlueNoiseGR, false, 1>("Blue 256", "out/E_blue_256%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::WhiteNoise, false>("Stratified White 4", "out/F_stratified_white_4%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<9, 3, RayPattern::Stratified, RNGSource::WhiteNoise, false>("Stratified White 9", "out/F_stratified_white_9%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::WhiteNoise, false, 1>("Stratified White 4", "out/F_stratified_white_4%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<9, 3, RayPattern::Stratified, RNGSource::WhiteNoise, false, 1>("Stratified White 9", "out/F_stratified_white_9%s.png", EProcess::Yes, EProcess::No);
 
-    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::BlueNoiseGR, false>("Stratified Blue 4", "out/G_stratified_blue_4%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<9, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR, false>("Stratified Blue 9", "out/G_stratified_blue_9%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::BlueNoiseGR, false, 1>("Stratified Blue 4", "out/G_stratified_blue_4%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<9, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR, false, 1>("Stratified Blue 9", "out/G_stratified_blue_9%s.png", EProcess::Yes, EProcess::No);
 
-    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise, true>("White 1 Stochastic Light", "out/H_white_1_stochastic%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR, true>("Blue 1 Stochastic Light", "out/H_blue_1_stochastic%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise, true, 1>("White 1 Stochastic Light", "out/H_white_1_stochastic%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR, true, 1>("Blue 1 Stochastic Light", "out/H_blue_1_stochastic%s.png", EProcess::Yes, EProcess::No);
+
+    
 
     system("pause");
     return 0;
