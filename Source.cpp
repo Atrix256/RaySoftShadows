@@ -148,6 +148,8 @@ static const float3 g_skyColor = float3{ 135.0f / 255.0f, 206.0f / 255.0f, 235.0
 
 SImageData<4> g_blueNoiseTexture;
 
+static const size_t c_numLights = sizeof(g_positionalLights) / sizeof(g_positionalLights[0]);
+
 //-------------------------------------------------------------------------------------------------------------------
 template <typename L>
 void RunMultiThreaded (const char* label, const L& lambda)
@@ -182,7 +184,7 @@ struct SGbufferPixel
 {
     SHitInfo hitInfo;
     float u, v;
-    float shadowMultipliersPositional[sizeof(g_positionalLights) / sizeof(g_positionalLights[0])];
+    float shadowMultipliersPositional[c_numLights];
     bool isLight = false;
     float3 worldPos;
 };
@@ -365,7 +367,7 @@ void Convolve (const std::vector<SGbufferPixel>& src, std::vector<SGbufferPixel>
 
                         const SGbufferPixel& inPixel = src[(sampleY * width + sampleX) * SAMPLES_PER_PIXEL + sampleIndex];
 
-                        for (size_t index = 0; index < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++index)
+                        for (size_t index = 0; index < c_numLights; ++index)
                             outPixel->shadowMultipliersPositional[index] += inPixel.shadowMultipliersPositional[index] * kernel[(offsetY + RADIUS) * numPixelsOneSide + (offsetX + RADIUS)];
                     }
                 }
@@ -409,17 +411,14 @@ enum class RayPattern
 enum class RNGSource
 {
     WhiteNoise,
-    Hash,
     BlueNoiseGR
 };
 
 //-------------------------------------------------------------------------------------------------------------------
 
-template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE>
-SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixelY, std::mt19937& rng)
+template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE, bool STOCHASTIC_LIGHT_SOURCE>
+SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixelY, size_t SSSampleIndex, std::mt19937& rng)
 {
-    // TODO: make all RNG_SOURCE types work!
-
     // raytrace to find primary ray intersection
     float3 rayPos = g_cameraPos;
     float3 rayDir = Normalize(g_cameraX * u + g_cameraY * v + g_cameraZ * g_cameraDistance);
@@ -430,7 +429,7 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
         RayIntersect(rayPos, rayDir, g_quads[i], ret.hitInfo);
 
     // see if a positional light was hit, and if so, don't do any shadow rays
-    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+    for (size_t lightIndex = 0; lightIndex < c_numLights; ++lightIndex)
     {
         SSphere lightSphere;
         lightSphere.position = g_positionalLights[lightIndex].position;
@@ -450,13 +449,69 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
 
     ret.worldPos = rayPos + rayDir * ret.hitInfo.collisionTime;
 
+    size_t selectedLightIndex = c_numLights;
+    if (STOCHASTIC_LIGHT_SOURCE)
+    {
+        float totalSize = 0.0f;
+
+        size_t lightIndex = 0;
+        for (lightIndex = 0; lightIndex < c_numLights; ++lightIndex)
+        {
+            float3 lightDir = Normalize(g_positionalLights[lightIndex].position - ret.worldPos);
+            float lightDistance = Length(g_positionalLights[lightIndex].position - ret.worldPos);
+            float lightDiscRadius = g_positionalLights[lightIndex].radius / lightDistance;
+            totalSize += lightDiscRadius;
+        }
+
+        float rngN;
+        switch (RNG_SOURCE)
+        {
+            case RNGSource::WhiteNoise:
+            {
+                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                rngN = dist(rng);
+                break;
+            }
+            case RNGSource::BlueNoiseGR:
+            {
+                size_t texX = pixelX % g_blueNoiseTexture.m_width;
+                size_t texY = pixelY % g_blueNoiseTexture.m_height;
+
+                float* blueNoise = g_blueNoiseTexture.GetPixel(texX, texY);
+                rngN = std::fmodf(blueNoise[2] + c_goldenRatioConjugate * float(SSSampleIndex), 1.0f);
+                break;
+            }
+            static_assert(RNG_SOURCE >= RNGSource::WhiteNoise && RNG_SOURCE <= RNGSource::BlueNoiseGR, "RNG_SOURCE invalid");
+        }
+
+        float chosenSize = totalSize * rngN;
+        for (lightIndex = 0; lightIndex < c_numLights; ++lightIndex)
+        {
+            float3 lightDir = Normalize(g_positionalLights[lightIndex].position - ret.worldPos);
+            float lightDistance = Length(g_positionalLights[lightIndex].position - ret.worldPos);
+            float lightDiscRadius = g_positionalLights[lightIndex].radius / lightDistance;
+
+            if (lightDiscRadius > chosenSize)
+                break;
+
+            chosenSize -= lightDiscRadius;
+        }
+        selectedLightIndex = clamp(lightIndex, (size_t)0, c_numLights-1);
+    }
+
+    // TODO: stochastic light choice might be a bad idea. What's the default for untested lights... shadowed or unshadowed?
+
     // shadow rays
     float3 pixelPos = rayPos + rayDir * ret.hitInfo.collisionTime;
     float3 shadowPos = pixelPos + ret.hitInfo.normal * c_rayEpsilon;
-    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+    for (size_t lightIndex = 0; lightIndex < c_numLights; ++lightIndex)
     {
+        if (selectedLightIndex != c_numLights && lightIndex != selectedLightIndex)
+            continue;
+
         float3 lightDir = Normalize(g_positionalLights[lightIndex].position - ret.worldPos);
         float lightDistance = Length(g_positionalLights[lightIndex].position - ret.worldPos);
+        float lightDiscRadius = g_positionalLights[lightIndex].radius / lightDistance;
 
         ret.shadowMultipliersPositional[lightIndex] = 1.0f;
 
@@ -473,18 +528,14 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                     rngY = dist(rng);
                     break;
                 }
-                case RNGSource::Hash:
-                {
-                    break;
-                }
                 case RNGSource::BlueNoiseGR:
                 {
                     size_t texX = pixelX % g_blueNoiseTexture.m_width;
                     size_t texY = pixelY % g_blueNoiseTexture.m_height;
 
                     float* blueNoise = g_blueNoiseTexture.GetPixel(texX, texY);
-                    rngX = std::fmodf(blueNoise[0] + c_goldenRatioConjugate * float(sampleIndex), 1.0f);
-                    rngY = std::fmodf(blueNoise[1] + c_goldenRatioConjugate * float(sampleIndex), 1.0f);
+                    rngX = std::fmodf(blueNoise[0] + c_goldenRatioConjugate * float(SSSampleIndex+sampleIndex), 1.0f);
+                    rngY = std::fmodf(blueNoise[1] + c_goldenRatioConjugate * float(SSSampleIndex+sampleIndex), 1.0f);
 
                     break;
                 }
@@ -505,7 +556,7 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                 {
                     if (SHADOW_RAY_COUNT == 1)
                     {
-                        sampleX = sampleY = 0.5f;
+                        sampleX = sampleY = 0.0f;
                     }
                     else
                     {
@@ -523,7 +574,7 @@ SGbufferPixel PixelFunctionGBuffer(float u, float v, size_t pixelX, size_t pixel
                 static_assert(RAY_PATTERN >= RayPattern::None && RAY_PATTERN <= RayPattern::Stratified,"RAY_PATTERN invalid");
             }
 
-            float3 randomDir = RandomVectorTowardsLight(lightDir, g_positionalLights[lightIndex].radius / lightDistance, sampleX, sampleY);
+            float3 randomDir = RandomVectorTowardsLight(lightDir, lightDiscRadius, sampleX, sampleY);
 
             SHitInfo shadowHitInfo;
             shadowHitInfo.collisionTime = lightDistance;
@@ -556,7 +607,7 @@ float3 PixelFunctionShade (const SGbufferPixel& gbufferData)
 
     float3 ret = g_skyColor * gbufferData.hitInfo.albedo;
 
-    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+    for (size_t lightIndex = 0; lightIndex < c_numLights; ++lightIndex)
     {
         float3 lightDir = Normalize(g_positionalLights[lightIndex].position - gbufferData.worldPos);
         float lightDistance = Length(g_positionalLights[lightIndex].position - gbufferData.worldPos);
@@ -592,7 +643,7 @@ void ShadePixels(const std::vector<SGbufferPixel>& gbuffer, SImageData<3>& outpu
 
 //-------------------------------------------------------------------------------------------------------------------
 
-template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE>
+template <size_t SHADOW_RAY_COUNT, size_t SHADOW_RAY_COUNT_GRID_SIZE, RayPattern RAY_PATTERN, RNGSource RNG_SOURCE, bool STOCHASTIC_LIGHT_SOURCE>
 void GeneratePixels(const char* task, const char* baseFileName, EProcess preProcess, EProcess postProcess)
 {
     char fileName[256];
@@ -650,7 +701,7 @@ void GeneratePixels(const char* task, const char* baseFileName, EProcess preProc
                         pixel.u = u + stratU;
                         pixel.v = v + stratV;
 
-                        pixel = PixelFunctionGBuffer<SHADOW_RAY_COUNT, SHADOW_RAY_COUNT_GRID_SIZE, RAY_PATTERN, RNG_SOURCE>(pixel.u, pixel.v, pixelIndex % output.m_width, pixelIndex / output.m_width, rng);
+                        pixel = PixelFunctionGBuffer<SHADOW_RAY_COUNT, SHADOW_RAY_COUNT_GRID_SIZE, RAY_PATTERN, RNG_SOURCE, STOCHASTIC_LIGHT_SOURCE>(pixel.u, pixel.v, pixelIndex % output.m_width, pixelIndex / output.m_width, sampleIndex, rng);
                     }
 
                     // report progress
@@ -682,18 +733,13 @@ void GeneratePixels(const char* task, const char* baseFileName, EProcess preProc
         while (pixelIndex < gbuffer1ShadowSample.size())
         {
             for (size_t sampleIndex = 1; sampleIndex < STRATIFIED_SAMPLE_COUNT(); ++sampleIndex)
-                for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+                for (size_t lightIndex = 0; lightIndex < c_numLights; ++lightIndex)
                     gbuffer1ShadowSample[pixelIndex+sampleIndex].shadowMultipliersPositional[lightIndex] = gbuffer1ShadowSample[pixelIndex].shadowMultipliersPositional[lightIndex];
 
             pixelIndex += STRATIFIED_SAMPLE_COUNT();
         }
 
         std::vector<SGbufferPixel> gbufferFiltered;
-
-        BoxBlurShadowMultipliers<1, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
-        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
-        sprintf_s(fileName, baseFileName, "_prebox3");
-        output.Save(fileName);
 
         BoxBlurShadowMultipliers<2, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
         ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
@@ -703,11 +749,6 @@ void GeneratePixels(const char* task, const char* baseFileName, EProcess preProc
         BoxBlurShadowMultipliers<3, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
         ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
         sprintf_s(fileName, baseFileName, "_prebox7");
-        output.Save(fileName);
-
-        TriangleBlurShadowMultipliers<1, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
-        ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
-        sprintf_s(fileName, baseFileName, "_pretriangle3");
         output.Save(fileName);
 
         TriangleBlurShadowMultipliers<2, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
@@ -722,9 +763,19 @@ void GeneratePixels(const char* task, const char* baseFileName, EProcess preProc
 
         if (preProcess == EProcess::Exhaustive)
         {
+            BoxBlurShadowMultipliers<1, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+            ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
+            sprintf_s(fileName, baseFileName, "_prebox3");
+            output.Save(fileName);
+
             BoxBlurShadowMultipliers<7, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
             ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
             sprintf_s(fileName, baseFileName, "_prebox15");
+            output.Save(fileName);
+
+            TriangleBlurShadowMultipliers<1, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
+            ShadePixels<STRATIFIED_SAMPLE_COUNT()>(gbufferFiltered, output);
+            sprintf_s(fileName, baseFileName, "_pretriangle3");
             output.Save(fileName);
 
             TriangleBlurShadowMultipliers<7, STRATIFIED_SAMPLE_COUNT()>(gbuffer1ShadowSample, gbufferFiltered, output.m_width, output.m_height);
@@ -799,7 +850,7 @@ float3 PixelFunctionPathTrace(const float3& rayPos, const float3& rayDir, std::m
         RayIntersect(rayPos, rayDir, g_quads[i], hitInfo);
 
     // check for intersections with spherical lights
-    for (size_t lightIndex = 0; lightIndex < sizeof(g_positionalLights) / sizeof(g_positionalLights[0]); ++lightIndex)
+    for (size_t lightIndex = 0; lightIndex < c_numLights; ++lightIndex)
     {
         SSphere lightSphere;
         lightSphere.position = g_positionalLights[lightIndex].position;
@@ -937,34 +988,35 @@ int main (int argc, char** argv)
 
     // path traced version
     #if DO_PATHTRACE()
-        Pathtrace("out/Pathtrace.png");
+        Pathtrace("out/A_Pathtrace.png");
     #endif
 
     // make sampled images
-    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise>("Hard", "out/hard_1%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<1, 1, RayPattern::Grid, RNGSource::WhiteNoise, false>("Hard", "out/B_hard_1%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise>("White 1", "out/white_1%s.png", EProcess::Exhaustive, EProcess::Exhaustive);
-    GeneratePixels<2, 3, RayPattern::None, RNGSource::WhiteNoise>("White 2", "out/white_2%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<4, 3, RayPattern::None, RNGSource::WhiteNoise>("White 4", "out/white_4%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise>("White 8", "out/white_8%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<64, 3, RayPattern::None, RNGSource::WhiteNoise>("White 64", "out/white_64%s.png", EProcess::No, EProcess::No);
-    GeneratePixels<256, 3, RayPattern::None, RNGSource::WhiteNoise>("White 256", "out/white_256%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise, false>("White 1", "out/C_white_1%s.png", EProcess::Exhaustive, EProcess::Exhaustive);
+    GeneratePixels<2, 3, RayPattern::None, RNGSource::WhiteNoise, false>("White 2", "out/C_white_2%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<4, 3, RayPattern::None, RNGSource::WhiteNoise, false>("White 4", "out/C_white_4%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::WhiteNoise, false>("White 8", "out/C_white_8%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<256, 3, RayPattern::None, RNGSource::WhiteNoise, false>("White 256", "out/C_white_256%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<9, 3, RayPattern::Grid, RNGSource::WhiteNoise>("Grid 9", "out/grid_9%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<256, 16, RayPattern::Grid, RNGSource::WhiteNoise>("Grid 256", "out/grid_256%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<9, 3, RayPattern::Grid, RNGSource::WhiteNoise, false>("Grid 9", "out/D_grid_9%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<256, 16, RayPattern::Grid, RNGSource::WhiteNoise, false>("Grid 256", "out/D_grid_256%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 1", "out/blue_1%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<2, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 2", "out/blue_2%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<4, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 4", "out/blue_4%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 8", "out/blue_8%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<64, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 64", "out/blue_64%s.png", EProcess::No, EProcess::No);
-    GeneratePixels<256, 3, RayPattern::None, RNGSource::BlueNoiseGR>("Blue 256", "out/blue_256%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR, false>("Blue 1", "out/E_blue_1%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<2, 3, RayPattern::None, RNGSource::BlueNoiseGR, false>("Blue 2", "out/E_blue_2%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<4, 3, RayPattern::None, RNGSource::BlueNoiseGR, false>("Blue 4", "out/E_blue_4%s.png", EProcess::No, EProcess::No);
+    GeneratePixels<8, 3, RayPattern::None, RNGSource::BlueNoiseGR, false>("Blue 8", "out/E_blue_8%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<256, 3, RayPattern::None, RNGSource::BlueNoiseGR, false>("Blue 256", "out/E_blue_256%s.png", EProcess::No, EProcess::No);
 
-    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White 4", "out/stratified4_blue_4%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<9, 3, RayPattern::Stratified, RNGSource::WhiteNoise>("Stratified White 9", "out/stratified_white_9%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::WhiteNoise, false>("Stratified White 4", "out/F_stratified_white_4%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<9, 3, RayPattern::Stratified, RNGSource::WhiteNoise, false>("Stratified White 9", "out/F_stratified_white_9%s.png", EProcess::Yes, EProcess::No);
 
-    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 4", "out/stratified4_blue_4%s.png", EProcess::Yes, EProcess::No);
-    GeneratePixels<9, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR>("Stratified Blue 9", "out/stratified_blue_9%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<4, 2, RayPattern::Stratified, RNGSource::BlueNoiseGR, false>("Stratified Blue 4", "out/G_stratified_blue_4%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<9, 3, RayPattern::Stratified, RNGSource::BlueNoiseGR, false>("Stratified Blue 9", "out/G_stratified_blue_9%s.png", EProcess::Yes, EProcess::No);
+
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::WhiteNoise, true>("White 1 Stochastic Light", "out/H_white_1_stochastic%s.png", EProcess::Yes, EProcess::No);
+    GeneratePixels<1, 3, RayPattern::None, RNGSource::BlueNoiseGR, true>("Blue 1 Stochastic Light", "out/H_blue_1_stochastic%s.png", EProcess::Yes, EProcess::No);
 
     system("pause");
     return 0;
@@ -974,7 +1026,7 @@ int main (int argc, char** argv)
 
 TODO:
 
-* make a version where it stochastically chooses which light to sample based on disc size.
+* trim the number of files actually generated
 
 * median filter gbuffer
 
